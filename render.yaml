@@ -1,0 +1,29 @@
+# Render Blueprint — New > Blueprint, pick this repo. You'll be asked for the values marked sync:false.
+services:
+  - type: web
+    name: agencydesk-api
+    runtime: node
+    plan: free            # use "starter" or above in production so it never sleeps
+    region: singapore
+    buildCommand: npm ci --prefix server
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: agencydesk
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: APP_URL          # your Vercel URL, e.g. https://agencydesk.vercel.app — used in email links
+        sync: false
+      - key: RESEND_API_KEY   # optional: enables invites, password resets and emailed reminders
+        sync: false
+      - key: EMAIL_FROM       # e.g. "BrightPixel <accounts@yourdomain.in>" (domain verified in Resend)
+        sync: false
+      - key: TZ
+        value: Asia/Kolkata
+      - key: NODE_VERSION
+        value: "20"

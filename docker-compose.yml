@@ -1,0 +1,21 @@
+# Self-host on any server:  JWT_SECRET=$(openssl rand -hex 48) docker compose up -d
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes: [mongo-data:/data/db]
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on: [mongo]
+    ports: ["${PORT:-4000}:4000"]
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB: agencydesk
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to a long random string}
+      CRON_SECRET: ${CRON_SECRET:-}
+      APP_URL: ${APP_URL:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+volumes:
+  mongo-data:
