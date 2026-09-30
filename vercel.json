@@ -4,7 +4,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://agencydesk-api.onrender.com/api/:path*"
+      "destination": "https://marketing-crm-awc6.onrender.com/api/:path*"
     }
   ],
   "headers": [
