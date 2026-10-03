@@ -1,5 +1,5 @@
 # AgencyDesk — API + frontend in one image
-FROM node:20-alpine
+FROM node:24-alpine
 ENV NODE_ENV=production TZ=Asia/Kolkata PORT=4000
 RUN apk add --no-cache tzdata
 WORKDIR /app

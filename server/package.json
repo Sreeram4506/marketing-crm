@@ -1,11 +1,11 @@
 {
   "name": "agencydesk-api",
-  "version": "3.0.0",
+  "version": "3.3.0",
   "private": true,
   "description": "AgencyDesk API — Express + MongoDB",
   "main": "index.js",
   "engines": {
-    "node": ">=18.17"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node index.js",

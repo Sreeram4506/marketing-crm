@@ -17,6 +17,7 @@ async function connect(uri, dbName) {
     db.collection('tasks').createIndex({ clientId: 1 }),
     db.collection('attendance').createIndex({ userId: 1, date: 1 }),
     db.collection('files.files').createIndex({ 'metadata.ownerId': 1 }),
+    db.collection('ai_memory').createIndex({ scope: 1, userId: 1 }),
   ]);
   return db;
 }
