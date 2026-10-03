@@ -75,6 +75,14 @@ Press the sparkle button (or **Ctrl/⌘ + J**) and talk or type. The co-founder 
   - "Clock me in." / "Going for lunch." / "Clock me out — finished the storyboards."
   - "Log Apollo's review: five stars, NPS nine." / "Draft a reminder for GreenLeaf." / "Open FitNation's billing."
   - "Add Mulukuri Sreeram as a graphic designer, sreeram@ourmail.in, 25,000 a month." / "Raise Kavya to 60 thousand." / "What's September's payroll?" (admins; adding people and changing salaries need confirmation)
+  - **Anything the app can do:**
+    - **Payroll:** "Generate September payroll with everyone's salary slips." It opens Payroll on that month, downloads the Excel sheet and prepares the slips.
+    - **Billing:** "Invoice Apollo 4,000 for extra revisions" (opens the PDF). "Mark GreenLeaf's invoice disputed." "Remove that wrong UPI entry." "Send the due reminders."
+    - **Clients:** "Raise FitNation to 60 thousand and 10 reels." "Tick UrbanThreads' onboarding step 3." "Apollo referred SmileCare, 5k credit." "Archive Zen Yoga."
+    - **Production:** "Kit is packed for the Spice Route shoot." "Client asked for another revision." "Start my timer on the Diwali reel." "Delete that duplicate task."
+    - **Team:** "Arjun forgot to clock out on the 15th — set it to 6:10 pm." "Cancel my leave request."
+    - **Reports and settings:** "Export the GST register for last quarter." "Set max revisions to 3."
+    - **Not available (on purpose):** passwords, client portal logins, file uploads and backup restores. Do these on their own pages.
 - **Voice:**
   - Tap the mic to speak. Replies are read aloud as they're written, and you can talk over the co-founder to interrupt it.
   - **Hands-free mode** (headset icon) keeps the conversation going without tapping.
@@ -223,7 +231,7 @@ Open http://localhost:4000. This needs MongoDB running locally, for example `bre
 ```bash
 MONGODB_URI=mongodb://127.0.0.1:27017 npm test --prefix server
 ```
-There are 52 end-to-end tests: 36 for the app and 16 for the AI co-founder, which run against a scripted stand-in for the OpenAI API. Each run starts a real server against a throwaway database (dropped afterwards), with stand-ins for the webhook and email provider. They cover:
+There are 56 end-to-end tests: 36 for the app and 20 for the AI co-founder, which run against a scripted stand-in for the OpenAI API. Each run starts a real server against a throwaway database (dropped afterwards), with stand-ins for the webhook and email provider. They cover:
 - **Setup and sign-in:** first-run setup, logins, rate limits, account lockout, weak passwords.
 - **2FA:** enrolment, sign-in challenge, single-use recovery codes, requiring 2FA by role.
 - **Sessions and email links:** "sign out everywhere", password-reset and invite links (single use), leave notifications.

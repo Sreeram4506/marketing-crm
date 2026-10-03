@@ -11,9 +11,11 @@ const insights = require('./insights');
 const memory = require('./memory');
 const cfg = require('../config');
 const notify = require('../notify');
+const { runAutomations } = require('../automation');
 
 const S = shared;
-const NEEDS_CONFIRMATION = new Set(['record_payment', 'create_client', 'decide_leave', 'plan_month', 'add_team_member', 'update_team_member']);
+const NEEDS_CONFIRMATION = new Set(['record_payment', 'create_client', 'decide_leave', 'plan_month', 'add_team_member', 'update_team_member', 'delete_task', 'create_invoice', 'remove_payment', 'send_reminders', 'correct_attendance', 'update_settings']);
+// Tools may also ask for confirmation case by case by returning { summary, run } (e.g. a client fee change)
 const STAFF = ['admin', 'pm', 'creative', 'shoot', 'finance'];
 
 /* ---------- Tool definitions (sent to the model; keep order stable for prompt caching) ---------- */
@@ -46,7 +48,33 @@ const DEFINITIONS = [
     input_schema: { type: 'object', properties: {
       task: str('Task title or id (include the client name if titles repeat)'), client: str('Client name, to disambiguate'), status: str('New stage'),
       assignee: str('Person name'), due_date: str('YYYY-MM-DD'), priority: str('Urgent, High, Medium or Low'), link: str('https:// link to the asset'), note: str('Text to append to the brief'),
+      title: str('New title'), publish_date: str('YYYY-MM-DD'), client_revision: { type: 'boolean', description: 'Log one more client revision round (over the limit becomes billable)' },
+      shoot_date: str('YYYY-MM-DD for shoot tasks'), shoot_time: str('HH:MM'), crew: str('Comma-separated crew names'), checklist: str('"all", or comma-separated kit items done (camera, lens, mic, gimbal, card, batteries, lights)'), raw_link: str('https:// link to raw footage'),
     }, required: ['task'] } },
+  { name: 'delete_task', description: 'Delete a task (admins and managers). Requires confirmation.',
+    input_schema: { type: 'object', properties: { task: str('Task title or id'), client: str('Client name, to disambiguate') }, required: ['task'] } },
+  { name: 'task_timer', description: 'Start or stop the current user\'s time-tracking timer on a task.',
+    input_schema: { type: 'object', properties: { action: str('start or stop'), task: str('Task title (for start)') }, required: ['action'] } },
+  { name: 'create_invoice', description: 'Create a one-off invoice for extra work (billable revisions, an extra shoot, a missed month). GST is added automatically. Requires confirmation. Monthly retainers are invoiced automatically — don\'t use this for them.',
+    input_schema: { type: 'object', properties: { client: str('Client name'), description: str('What it is for'), amount: num('Amount before GST, rupees'), month: str('Billing month YYYY-MM, default this month') }, required: ['client', 'description', 'amount'] } },
+  { name: 'invoice_dispute', description: 'Mark an invoice as in dispute (with the reason) or resolve the dispute.',
+    input_schema: { type: 'object', properties: { invoice: str('Invoice number or client name'), action: str('open or resolve'), reason: str('What the client disputes') }, required: ['invoice', 'action'] } },
+  { name: 'remove_payment', description: 'Remove a wrongly recorded payment entry from an invoice. Requires confirmation.',
+    input_schema: { type: 'object', properties: { invoice: str('Invoice number'), amount: num('Amount of the entry to remove'), reference: str('Its transaction reference') }, required: ['invoice'] } },
+  { name: 'send_reminders', description: 'Send every payment reminder that is due now, by the configured webhook (WhatsApp/automation) and email. Requires confirmation.',
+    input_schema: { type: 'object', properties: {} } },
+  { name: 'invoice_pdf', description: 'Open an invoice or a payment receipt as a printable document (PDF) on the user\'s screen.',
+    input_schema: { type: 'object', properties: { invoice: str('Invoice number or client name') }, required: ['invoice'] } },
+  { name: 'correct_attendance', description: 'Admins: set or correct someone\'s clock-in / clock-out time for a day (e.g. a missed clock-out). Requires confirmation.',
+    input_schema: { type: 'object', properties: { person: str('Name'), date: str('YYYY-MM-DD'), clock_in: str('HH:MM, 24-hour'), clock_out: str('HH:MM, 24-hour') }, required: ['person', 'date'] } },
+  { name: 'withdraw_leave', description: 'Withdraw the current user\'s own pending leave request.',
+    input_schema: { type: 'object', properties: { from: str('Start date of the request, YYYY-MM-DD, if they have several') } } },
+  { name: 'generate_payroll', description: 'Generate payroll for a month (admins and finance): calculates everyone\'s gross, loss of pay, PF, professional tax, TDS and net pay, opens the Payroll screen on that month and downloads the payroll sheet (Excel). Optionally also opens salary slips.',
+    input_schema: { type: 'object', properties: { month: str('YYYY-MM; default last month'), salary_slip_for: str('Open the salary slip for this person, or "everyone"') } } },
+  { name: 'export_report', description: 'Download a report as Excel: revenue (by client), gst (GST register), deliverables (proof of work), payroll, invoices, clients, tasks or attendance.',
+    input_schema: { type: 'object', properties: { report: str('revenue, gst, deliverables, payroll, invoices, clients, tasks or attendance'), from: str('YYYY-MM'), to: str('YYYY-MM'), client: str('Client name, for deliverables') }, required: ['report'] } },
+  { name: 'update_settings', description: 'Admins: change agency settings — agencyName, agencyAddress, agencyEmail, agencyPhone, gstin, sac, gstRate, bankDetails, upiId, invoicePrefix, dueDays, maxRevisions, workStart / workEnd (HH:MM), graceMinutes, halfDayHours, weekOff (array of day numbers, 0 = Sunday), pfEnabled, captureIp, autoWebhook, emailReminders, notifyLeave, overloadThreshold. Requires confirmation.',
+    input_schema: { type: 'object', properties: { changes: { type: 'object', description: 'Setting name → new value', additionalProperties: true } }, required: ['changes'] } },
   { name: 'record_payment', description: 'Record money received against an invoice. Requires the user\'s confirmation before it is saved.',
     input_schema: { type: 'object', properties: {
       invoice: str('Invoice number, or the client name to use their oldest unpaid invoice'), amount: num('Amount in rupees; omit to settle the full balance'),
@@ -58,8 +86,18 @@ const DEFINITIONS = [
       monthly_fee: num('Monthly retainer before GST, rupees'), status: str('Lead, Onboarding or Active'), billing_day: num('Day of month to invoice, default 1'),
       payment_terms: str('100% Advance, 50-50 Milestone, Net 15 or Net 30'), posters: num('Posters per month'), reels: num('Reels per month'), stories: num('Stories per month'), blogs: num('Blogs per month'), shoots: num('Shoots per month'),
     }, required: ['company', 'contact'] } },
-  { name: 'update_client', description: 'Update a client: append to notes, change sentiment (Delighted, Neutral, At-Risk, Critical) or status (Lead, Onboarding, Active, On Hold, Churned).',
-    input_schema: { type: 'object', properties: { client: str('Client name or id'), note: str('Text to append to notes'), sentiment: str('Sentiment'), status: str('Status') }, required: ['client'] } },
+  { name: 'update_client', description: 'Edit a client: contact details, notes, sentiment (Delighted, Neutral, At-Risk, Critical), status (Lead, Onboarding, Active, On Hold, Churned), account manager, package (monthly fee, billing day, payment terms, contract end) and monthly quotas, or archive / restore. Fee, terms, quota, status and archive changes ask for confirmation.',
+    input_schema: { type: 'object', properties: {
+      client: str('Client name or id'), note: str('Text to append to notes'), sentiment: str('Sentiment'), status: str('Status'),
+      company: str('New business name'), contact: str('Contact person'), email: str('Email'), phone: str('Phone'), whatsapp: str('WhatsApp number'), address: str('Address'), gstin: str('GSTIN'), category: str('Category'),
+      manager: str('Account manager (person name)'), monthly_fee: num('Monthly fee before GST'), billing_day: num('Day of month to invoice (1-28)'), payment_terms: str('100% Advance, 50-50 Milestone, Net 15 or Net 30'), contract_end: str('YYYY-MM-DD'),
+      posters: num('Posters per month'), carousels: num('Carousels per month'), reels: num('Reels per month'), stories: num('Stories per month'), blogs: num('Blogs per month'), shoots: num('Shoots per month'),
+      archive: { type: 'boolean', description: 'true to archive (hide), false to restore' },
+    }, required: ['client'] } },
+  { name: 'client_onboarding', description: 'Tick (or untick) a client onboarding step; when all are done, set the client Active with update_client.',
+    input_schema: { type: 'object', properties: { client: str('Client name'), step: str('Step name or number (1-5)'), done: { type: 'boolean', description: 'Default true' } }, required: ['client', 'step'] } },
+  { name: 'referral', description: 'Log a referral a client made, or update one (status Lead, Converted, Lost; credit amount; whether the credit was applied).',
+    input_schema: { type: 'object', properties: { client: str('The referring client'), business: str('The referred business'), action: str('add or update'), status: str('Lead, Converted or Lost'), credit: num('Referral credit in rupees'), credit_applied: { type: 'boolean' }, notes: str('Notes') }, required: ['client', 'business'] } },
   { name: 'log_feedback', description: 'Log a client\'s monthly review: CSAT 1-5 and NPS 0-10.',
     input_schema: { type: 'object', properties: { client: str('Client name or id'), month: str('YYYY-MM, default last month'), csat: num('1-5'), nps: num('0-10'), notes: str('What they said') }, required: ['client', 'csat', 'nps'] } },
   { name: 'request_leave', description: 'Request leave for the current user. Types: casual, sick, pto, unpaid.',
@@ -149,6 +187,14 @@ function findInvoice(v, ref) {
   const unpaid = v.invoices.filter((p) => p.clientId === c.id && S.balance(p) > 0).sort((a, b) => a.issueDate.localeCompare(b.issueDate));
   if (!unpaid.length) fail(`${c.company} has no unpaid invoices.`);
   return unpaid[0];
+}
+/* An invoice by number, or the client's most recent unpaid (else latest) invoice */
+function pickInvoice(v, ref) {
+  const byNo = v.invoices.filter((p) => norm(p.invoiceNo) === norm(ref));
+  if (byNo.length === 1) return byNo[0];
+  const c = findClient(v, ref);
+  const mine = v.invoices.filter((p) => p.clientId === c.id).sort((a, b) => b.issueDate.localeCompare(a.issueDate));
+  return mine.find((p) => S.balance(p) > 0) || mine[0] || fail(`${c.company} has no invoices.`);
 }
 const clientName = (v, id) => (v.clients.find((c) => c.id === id) || {}).company || 'unknown client';
 const userName = (v, id) => (v.users.find((u) => u.id === id) || {}).name || 'unassigned';
@@ -318,10 +364,34 @@ const IMPL = {
     if (input.priority) { if (!S.PRIORITIES.includes(input.priority)) fail('Priority must be Urgent, High, Medium or Low.'); next.priority = input.priority; changes.push(`priority ${input.priority}`); }
     if (input.link) { next.link = input.link; changes.push('asset link set'); }
     if (input.note) { next.description = [t.description, input.note].filter(Boolean).join('\n'); changes.push('note added'); }
+    if (input.title) { if (!['admin', 'pm'].includes(ctx.user.role)) fail('Only managers can rename tasks.'); next.title = String(input.title).slice(0, 200); changes.push(`renamed to ${next.title}`); }
+    if (input.publish_date) { if (!isDate(input.publish_date)) fail('Publish date must be YYYY-MM-DD.'); next.publishDate = input.publish_date; changes.push(`publish ${input.publish_date}`); }
+    let revisionNote = null;
+    if (input.client_revision) {
+      next.revisions = (t.revisions || 0) + 1;
+      if (next.revisions > (t.maxRevisions || 2)) next.billable = true;
+      changes.push(`client revision ${next.revisions}/${t.maxRevisions || 2}${next.revisions > (t.maxRevisions || 2) ? ' — over the limit, billable' : ''}`);
+      revisionNote = { action: next.revisions > (t.maxRevisions || 2) ? 'Billable revision' : 'Client revision logged', details: `${t.title} (${clientName(v, t.clientId)}) — revision ${next.revisions}/${t.maxRevisions || 2}`, entity: 'task', entityId: t.id, clientId: t.clientId };
+    }
+    if (input.shoot_date || input.shoot_time || input.crew || input.checklist || input.raw_link) {
+      if (t.type !== 'shoot') fail('That task is not a shoot.');
+      const sh = { ...(t.shoot || {}), checklist: { ...((t.shoot && t.shoot.checklist) || {}) } };
+      const mgr = ['admin', 'pm'].includes(ctx.user.role);
+      if (input.shoot_date) { if (!mgr) fail('Only managers can reschedule shoots.'); if (!isDate(input.shoot_date)) fail('Shoot date must be YYYY-MM-DD.'); sh.date = input.shoot_date; changes.push(`shoot on ${input.shoot_date}`); }
+      if (input.shoot_time) { if (!mgr) fail('Only managers can reschedule shoots.'); if (!/^\d{1,2}:\d{2}$/.test(input.shoot_time)) fail('Time must be HH:MM.'); sh.time = input.shoot_time.padStart(5, '0'); changes.push(`at ${sh.time}`); }
+      if (input.crew) { if (!mgr) fail('Only managers can change the crew.'); sh.crewIds = String(input.crew).split(',').map((n) => findUser(v, n.trim(), ctx.user).id); changes.push('crew updated'); }
+      if (input.checklist) {
+        const keys = norm(input.checklist) === 'all' ? S.SHOOT_CHECKLIST.map((x) => x.key) : String(input.checklist).split(',').map((w) => (S.SHOOT_CHECKLIST.find((x) => norm(x.key) === norm(w) || norm(x.label).includes(norm(w))) || fail(`Unknown kit item "${w.trim()}". Items: ${S.SHOOT_CHECKLIST.map((x) => x.key).join(', ')}.`)).key);
+        keys.forEach((key) => (sh.checklist[key] = true));
+        changes.push(`checklist ${S.SHOOT_CHECKLIST.filter((x) => sh.checklist[x.key]).length}/${S.SHOOT_CHECKLIST.length}`);
+      }
+      if (input.raw_link) { sh.rawLink = input.raw_link; changes.push('raw files handed off'); }
+      next.shoot = sh;
+    }
     if (!changes.length) fail('Nothing to change was given.');
-    await commit(ctx, { tasks: { upsert: [next] } }, [{ action: input.status ? 'Task status changed' : 'Task updated', details: `${t.title} (${clientName(v, t.clientId)}) — ${changes.join(', ')}`, entity: 'task', entityId: t.id, clientId: t.clientId }]);
+    await commit(ctx, { tasks: { upsert: [next] } }, [{ action: input.status ? 'Task status changed' : 'Task updated', details: `${t.title} (${clientName(v, t.clientId)}) — ${changes.join(', ')}`, entity: 'task', entityId: t.id, clientId: t.clientId }, ...(revisionNote ? [revisionNote] : [])]);
     const saved = (await viewFor(ctx.user)).tasks.find((x) => x.id === t.id);
-    const dropped = ['status', 'assigneeId', 'dueDate', 'priority', 'link', 'description'].filter((k) => next[k] !== t[k] && saved && saved[k] !== next[k]);
+    const dropped = ['status', 'assigneeId', 'dueDate', 'priority', 'link', 'description', 'title', 'publishDate', 'revisions'].filter((k) => next[k] !== t[k] && saved && saved[k] !== next[k]);
     if (dropped.length) fail(`Saved, but your role isn't allowed to change: ${dropped.join(', ')}.`);
     return { updated: taskLine(v, next), changes };
   },
@@ -376,14 +446,75 @@ const IMPL = {
   async update_client(input, ctx) {
     needRole(ctx, ['admin', 'pm'], 'edit clients');
     const v = bind(await viewFor(ctx.user));
-    const c = findClient(v, input.client);
-    const next = { ...c }, changes = [];
+    const c = input.archive === false ? pickOne('client', v.clients, input.client, (x) => x.company) : findClient(v, input.client);
+    const next = { ...c, package: { ...c.package, quotas: { ...(c.package.quotas || {}) } } }, changes = [];
+    let risky = false;
     if (input.note) { next.notes = [c.notes, `${today()}: ${input.note}`].filter(Boolean).join('\n'); changes.push('note added'); }
     if (input.sentiment) { const s = S.SENTIMENTS.find((x) => norm(x) === norm(input.sentiment)); if (!s) fail(`Sentiment must be ${S.SENTIMENTS.join(', ')}.`); next.sentiment = s; changes.push(`sentiment ${c.sentiment} → ${s}`); }
-    if (input.status) { const s = S.CLIENT_STATUSES.find((x) => norm(x) === norm(input.status)); if (!s) fail(`Status must be ${S.CLIENT_STATUSES.join(', ')}.`); next.status = s; changes.push(`status ${c.status} → ${s}`); }
+    if (input.status) {
+      const s = S.CLIENT_STATUSES.find((x) => norm(x) === norm(input.status)); if (!s) fail(`Status must be ${S.CLIENT_STATUSES.join(', ')}.`);
+      next.status = s; next.package.isActive = s === 'Active'; if (s === 'Active' && !next.package.startDate) next.package.startDate = today();
+      changes.push(`status ${c.status} → ${s}`); risky = true;
+    }
+    for (const [k, f] of [['company', 'company'], ['contact', 'contact'], ['email', 'email'], ['phone', 'phone'], ['whatsapp', 'whatsapp'], ['address', 'address'], ['gstin', 'gstin']]) {
+      if (input[k] != null && String(input[k]).trim()) { next[f] = String(input[k]).trim(); changes.push(`${k} updated`); }
+    }
+    if (input.category) { next.category = S.CATEGORIES.find((x) => norm(x) === norm(input.category)) || fail(`Category must be one of ${S.CATEGORIES.join(', ')}.`); changes.push(`category ${next.category}`); }
+    if (input.manager) { const m = findUser(v, input.manager, ctx.user); if (!['admin', 'pm'].includes(m.role)) fail(`${m.name} isn't a manager.`); next.managerId = m.id; changes.push(`manager ${m.name}`); }
+    if (input.monthly_fee != null) { const fee = Number(input.monthly_fee); if (!(fee >= 0)) fail('Fee must be a number.'); next.package.monthlyFee = Math.round(fee); changes.push(`fee ${rupees(c.package.monthlyFee)} → ${rupees(fee)}/month`); risky = true; }
+    if (input.billing_day != null) { next.package.billingDay = Math.min(28, Math.max(1, Math.round(Number(input.billing_day) || 1))); next.package.billingCycle = next.package.billingDay === 1 ? '1' : 'custom'; changes.push(`billed on day ${next.package.billingDay}`); risky = true; }
+    if (input.payment_terms) { next.package.paymentTerms = S.PAYMENT_TERMS.find((x) => norm(x) === norm(input.payment_terms)) || fail(`Terms must be ${S.PAYMENT_TERMS.join(', ')}.`); changes.push(`terms ${next.package.paymentTerms}`); risky = true; }
+    if (input.contract_end) { if (!isDate(input.contract_end)) fail('Contract end must be YYYY-MM-DD.'); next.package.endDate = input.contract_end; changes.push(`contract ends ${input.contract_end}`); }
+    [['poster', 'posters'], ['carousel', 'carousels'], ['reel', 'reels'], ['story', 'stories'], ['blog', 'blogs'], ['shoot', 'shoots']].forEach(([k, f]) => {
+      if (input[f] == null) return;
+      const n = Math.max(0, Math.round(Number(input[f]) || 0));
+      if (n) next.package.quotas[k] = n; else delete next.package.quotas[k];
+      if (k === 'shoot') next.package.shootsPerMonth = n;
+      changes.push(`quota ${n} ${f}`); risky = true;
+    });
+    if (input.archive != null) { next.archived = !!input.archive; changes.push(input.archive ? 'archived' : 'restored'); risky = true; }
     if (!changes.length) fail('Nothing to change was given.');
-    await commit(ctx, { clients: { upsert: [next] } }, [{ action: input.sentiment ? 'Sentiment changed' : 'Client updated', details: `${c.company} — ${changes.join('; ')}`, entity: 'client', entityId: c.id, clientId: c.id }]);
-    return { updated: c.company, changes };
+    const save = async () => {
+      await commit(ctx, { clients: { upsert: [next] } }, [{ action: input.archive != null ? (input.archive ? 'Client archived' : 'Client restored') : changes.some((x) => x.startsWith('quota')) ? 'Quota edited' : input.sentiment ? 'Sentiment changed' : 'Client updated', details: `${c.company} — ${changes.join('; ')}`, entity: 'client', entityId: c.id, clientId: c.id }]);
+      return { updated: c.company, changes };
+    };
+    if (risky) return { summary: `Update ${c.company}: ${changes.join('; ')}`, run: save };
+    return save();
+  },
+
+  async client_onboarding(input, ctx) {
+    needRole(ctx, ['admin', 'pm'], 'update onboarding');
+    const v = bind(await viewFor(ctx.user));
+    const c = findClient(v, input.client);
+    const n = Number(input.step);
+    const i = n >= 1 && n <= S.ONBOARDING_STEPS.length ? n - 1 : S.ONBOARDING_STEPS.findIndex((x) => norm(x).includes(norm(input.step)) || norm(input.step).includes(norm(x)));
+    if (i < 0) fail(`Steps are: ${S.ONBOARDING_STEPS.map((x, k) => `${k + 1}. ${x}`).join('; ')}.`);
+    const done = input.done !== false;
+    const onboarding = S.ONBOARDING_STEPS.map((_, k) => (c.onboarding && c.onboarding[k]) || { done: false, date: '' });
+    onboarding[i] = { done, date: done ? today() : '' };
+    await commit(ctx, { clients: { upsert: [{ ...c, onboarding }] } }, [{ action: done ? 'Onboarding step completed' : 'Onboarding step reopened', details: `${c.company} — ${S.ONBOARDING_STEPS[i]}`, entity: 'client', entityId: c.id, clientId: c.id }]);
+    const left = onboarding.filter((x) => !x.done).length;
+    return { updated: c.company, step: S.ONBOARDING_STEPS[i], done, steps_left: left, hint: !left && c.status === 'Onboarding' ? 'All steps done — offer to set the client Active.' : undefined };
+  },
+
+  async referral(input, ctx) {
+    needRole(ctx, ['admin', 'pm'], 'manage referrals');
+    const v = bind(await viewFor(ctx.user));
+    const c = findClient(v, input.client);
+    const refs = (c.referrals || []).slice();
+    const status = input.status ? (['Lead', 'Converted', 'Lost'].find((x) => norm(x) === norm(input.status)) || fail('Status must be Lead, Converted or Lost.')) : null;
+    let r = refs.find((x) => norm(x.name) === norm(input.business)) || refs.find((x) => norm(x.name).includes(norm(input.business)));
+    let action;
+    if (!r || norm(input.action) === 'add') {
+      r = { id: S.uid('ref'), name: String(input.business).trim().slice(0, 150), date: today(), status: status || 'Lead', credit: Math.max(0, Number(input.credit) || 0), creditApplied: !!input.credit_applied, notes: input.notes || '' };
+      refs.push(r); action = 'Referral logged';
+    } else {
+      const i = refs.indexOf(r);
+      r = { ...r, ...(status ? { status } : {}), ...(input.credit != null ? { credit: Math.max(0, Number(input.credit) || 0) } : {}), ...(input.credit_applied != null ? { creditApplied: !!input.credit_applied } : {}), ...(input.notes ? { notes: input.notes } : {}) };
+      refs[i] = r; action = input.credit_applied != null ? 'Referral credit' : 'Referral logged';
+    }
+    await commit(ctx, { clients: { upsert: [{ ...c, referrals: refs }] } }, [{ action, details: `${c.company} referred ${r.name} (${r.status})${r.credit ? `, credit ${rupees(r.credit)}${r.creditApplied ? ' applied' : ''}` : ''}`, entity: 'client', entityId: c.id, clientId: c.id }]);
+    return { logged: `${c.company} → ${r.name}: ${r.status}${r.credit ? `, credit ${rupees(r.credit)}${r.creditApplied ? ' (applied)' : ''}` : ''}` };
   },
 
   async log_feedback(input, ctx) {
@@ -605,6 +736,211 @@ const IMPL = {
     const rows = people.filter((u) => u.ctc && (!u.joinDate || u.joinDate <= mk + '-31')).map((u) => { const p = S.payslip(u, mk); return { name: u.name, gross: p.monthly, lop_days: p.lop, lop: p.lopAmt, pf: p.pf, professional_tax: p.pt, tds: p.tds, net: p.net }; });
     return { month: mk, in_progress: mk >= S.monthKey() || undefined, people: rows.length, gross_total: rows.reduce((a, r) => a + r.gross, 0), net_total: rows.reduce((a, r) => a + r.net, 0), rows,
       no_salary_set: missing.length ? missing : undefined };
+  },
+
+  async delete_task(input, ctx) {
+    needRole(ctx, ['admin', 'pm'], 'delete tasks');
+    const v = bind(await viewFor(ctx.user));
+    const t = findTask(v, input.task, input.client);
+    return {
+      summary: `Delete the task "${t.title}" for ${clientName(v, t.clientId)} (${t.status}, due ${t.dueDate})`,
+      run: async () => {
+        await commit(ctx, { tasks: { delete: [t.id] } }, [{ action: 'Task deleted', details: `${t.title} (${clientName(v, t.clientId)})`, entity: 'task', entityId: t.id, clientId: t.clientId }]);
+        return { deleted: t.title };
+      },
+    };
+  },
+
+  async task_timer(input, ctx) {
+    needRole(ctx, ['admin', 'pm', 'creative', 'shoot'], 'track time');
+    const v = bind(await viewFor(ctx.user));
+    const me = v.users.find((u) => u.id === ctx.user.id);
+    const running = me.timer && me.timer.taskId ? me.timer : null;
+    const stop = (changes, tm) => {
+      const t = v.tasks.find((x) => x.id === tm.taskId);
+      if (t) changes.tasks = { upsert: [{ ...t, timeLogs: [...(t.timeLogs || []), { userId: me.id, start: tm.start, end: Date.now() }] }] };
+      return t;
+    };
+    const hrs = (ms) => `${Math.floor(ms / 3600000)}h ${Math.round((ms % 3600000) / 60000)}m`;
+    if (norm(input.action) === 'stop') {
+      if (!running) fail('No timer is running.');
+      const changes = { users: { upsert: [{ ...me, timer: null }] } };
+      const t = stop(changes, running);
+      await commit(ctx, changes, [{ action: 'Timer stopped', details: `${t ? t.title : 'task'} — ${hrs(Date.now() - running.start)} (stopped by voice)`, entity: 'task', entityId: running.taskId, clientId: t ? t.clientId : '' }]);
+      return { timer_stopped: t ? t.title : 'task', time: hrs(Date.now() - running.start) };
+    }
+    if (norm(input.action) !== 'start') fail('Action must be start or stop.');
+    const t = findTask(v, input.task || '', null);
+    const changes = { users: { upsert: [{ ...me, timer: { taskId: t.id, start: Date.now() } }] } };
+    if (running && running.taskId !== t.id) stop(changes, running);
+    await commit(ctx, changes, []);
+    return { timer_started: t.title, client: clientName(v, t.clientId), stopped_previous: running && running.taskId !== t.id ? true : undefined };
+  },
+
+  async create_invoice(input, ctx) {
+    needRole(ctx, ['admin', 'finance'], 'create invoices');
+    const v = bind(await viewFor(ctx.user));
+    const c = findClient(v, input.client);
+    if (c.status === 'Lead') fail(`${c.company} is still a lead.`);
+    const amount = Math.round(Number(input.amount));
+    if (!(amount > 0)) fail('Amount must be more than zero.');
+    if (!String(input.description || '').trim()) fail('What is the invoice for?');
+    const mk = /^\d{4}-\d{2}$/.test(input.month || '') ? input.month : S.monthKey();
+    const p = S.makeInvoice(v, c, { mk, issueDate: today(), subtotal: amount, description: String(input.description).trim().slice(0, 300), manual: true });
+    p.status = S.paymentStatus(p);
+    return {
+      summary: `Create a one-off invoice for ${c.company}: ${p.description} — ${rupees(amount)} + GST = ${rupees(p.amountDue)} (${mk})`,
+      run: async () => {
+        await commit(ctx, { invoices: { upsert: [p] } }, [{ action: 'Invoice created', details: `One-off invoice for ${c.company} — ${rupees(p.amountDue)} incl. GST (${p.description})`, entity: 'payment', entityId: p.id, clientId: c.id }]);
+        const saved = (await viewFor(ctx.user)).invoices.find((x) => x.id === p.id);
+        ctx.actions.push({ action: 'invoicePdf', invoiceId: p.id });
+        return { created: saved ? saved.invoiceNo : 'invoice', total: rupees(p.amountDue), opened: 'Invoice PDF' };
+      },
+    };
+  },
+
+  async invoice_dispute(input, ctx) {
+    needRole(ctx, ['admin', 'finance'], 'manage disputes');
+    const v = bind(await viewFor(ctx.user));
+    const p = pickInvoice(v, input.invoice);
+    const open = !/^resol/.test(norm(input.action));
+    if (open && p.dispute && p.dispute.open) fail(`${p.invoiceNo} is already in dispute.`);
+    if (!open && !(p.dispute && p.dispute.open)) fail(`${p.invoiceNo} isn't in dispute.`);
+    if (open && !String(input.reason || '').trim()) fail('What is the client disputing?');
+    const next = { ...p, dispute: open ? { open: true, reason: String(input.reason).slice(0, 1000), raisedAt: Date.now(), by: ctx.user.id } : { ...p.dispute, open: false, resolvedAt: Date.now() } };
+    await commit(ctx, { invoices: { upsert: [next] } }, [{ action: open ? 'Invoice disputed' : 'Dispute resolved', details: `${p.invoiceNo} (${clientName(v, p.clientId)})${open ? ` — ${input.reason}` : ''}`, entity: 'payment', entityId: p.id, clientId: p.clientId }]);
+    return { updated: p.invoiceNo, changes: [open ? 'marked in dispute' : 'dispute resolved'] };
+  },
+
+  async remove_payment(input, ctx) {
+    needRole(ctx, ['admin', 'finance'], 'change payments');
+    const v = bind(await viewFor(ctx.user));
+    const p = pickInvoice(v, input.invoice);
+    let txs = p.transactions;
+    if (input.reference) txs = txs.filter((t) => norm(t.ref) === norm(input.reference));
+    if (input.amount != null) txs = txs.filter((t) => t.amount === Math.round(Number(input.amount)));
+    if (!txs.length) fail(`No matching payment on ${p.invoiceNo}. Entries: ${p.transactions.map((t) => `${rupees(t.amount)} on ${t.date} (${t.mode}${t.ref ? ' ' + t.ref : ''})`).join('; ') || 'none'}.`);
+    if (txs.length > 1) fail(`Several payments match: ${txs.map((t) => `${rupees(t.amount)} on ${t.date} (${t.ref || t.mode})`).join('; ')}. Ask which one.`);
+    const t = txs[0];
+    return {
+      summary: `Remove the ${rupees(t.amount)} payment of ${t.date} (${t.mode}${t.ref ? ', ref ' + t.ref : ''}) from ${p.invoiceNo} — ${clientName(v, p.clientId)}`,
+      run: async () => {
+        await commit(ctx, { invoices: { upsert: [{ ...p, transactions: p.transactions.filter((x) => x.id !== t.id) }] } }, [{ action: 'Payment entry removed', details: `${rupees(t.amount)} removed from ${p.invoiceNo} (${clientName(v, p.clientId)})`, entity: 'payment', entityId: p.id, clientId: p.clientId }]);
+        return { removed: rupees(t.amount), invoice: p.invoiceNo };
+      },
+    };
+  },
+
+  async send_reminders(input, ctx) {
+    needRole(ctx, ['admin', 'finance'], 'send reminders');
+    const v = bind(await viewFor(ctx.user));
+    const due = S.remindersDue(v.invoices);
+    if (!due.length) fail('No reminders are due right now.');
+    if (!v.settings.webhookUrl && !(cfg.emailEnabled && v.settings.emailReminders)) fail('No reminder channel is set up — add a webhook in Settings or turn on email reminders. You can draft reminders with draft_reminder and send them by hand.');
+    return {
+      summary: `Send ${due.length} payment reminder${due.length > 1 ? 's' : ''} now (${[...new Set(due.map((r) => clientName(v, r.p.clientId)))].slice(0, 6).join(', ')})`,
+      run: async () => {
+        const r = await runAutomations({ force: true, sendNow: true });
+        ctx.changed = true;
+        return { sent: r.reminders, note: 'Sent through the configured webhook / email.' };
+      },
+    };
+  },
+
+  async invoice_pdf({ invoice }, ctx) {
+    needRole(ctx, ['admin', 'pm', 'finance'], 'see invoices');
+    const v = bind(await viewFor(ctx.user));
+    const p = pickInvoice(v, invoice);
+    ctx.actions.push({ action: 'invoicePdf', invoiceId: p.id });
+    return { opened: p.invoiceNo, page: `Invoice ${p.invoiceNo}` };
+  },
+
+  async correct_attendance(input, ctx) {
+    needRole(ctx, ['admin'], 'correct attendance');
+    const v = bind(await viewFor(ctx.user));
+    const p = findUser(v, input.person, ctx.user);
+    if (!isDate(input.date)) fail('Date must be YYYY-MM-DD.');
+    if (input.date > today()) fail('That date is in the future.');
+    const at = (hm) => { if (!/^\d{1,2}:\d{2}$/.test(hm || '')) fail('Times must be HH:MM (24-hour).'); return new Date(`${input.date}T${hm.padStart(5, '0')}:00`).getTime(); };
+    const a = S.attendanceFor(p.id, input.date, v);
+    const rec = a ? { ...a, breaks: a.breaks.slice() } : { id: S.uid('att'), userId: p.id, date: input.date, clockIn: null, clockOut: null, breaks: [], ip: '', eodId: '' };
+    if (input.clock_in) rec.clockIn = at(input.clock_in);
+    if (input.clock_out) rec.clockOut = at(input.clock_out);
+    if (!rec.clockIn) fail('A clock-in time is needed.');
+    if (rec.clockOut && rec.clockOut <= rec.clockIn) fail('Clock-out must be after clock-in.');
+    rec.breaks = rec.breaks.map((b) => (b.end ? b : { ...b, end: rec.clockOut || b.start }));
+    const fmt = (ts) => (ts ? new Date(ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : '—');
+    return {
+      summary: `Set ${p.name}'s attendance on ${input.date}: in ${fmt(rec.clockIn)}, out ${fmt(rec.clockOut)}${a ? ` (was ${fmt(a.clockIn)} – ${fmt(a.clockOut)})` : ' (no record before)'}`,
+      run: async () => {
+        await commit(ctx, { attendance: { upsert: [rec] } }, [{ action: 'Attendance corrected', details: `${p.name} — ${input.date}: ${fmt(rec.clockIn)} to ${fmt(rec.clockOut)}`, entity: 'attendance', entityId: rec.id }]);
+        return { updated: p.name, changes: [`${input.date}: ${fmt(rec.clockIn)} – ${fmt(rec.clockOut)}`] };
+      },
+    };
+  },
+
+  async withdraw_leave(input, ctx) {
+    const v = bind(await viewFor(ctx.user));
+    let mine = v.leaves.filter((l) => l.userId === ctx.user.id && l.status === 'Pending');
+    if (isDate(input.from)) mine = mine.filter((l) => l.from === input.from);
+    if (!mine.length) fail('You have no pending leave request to withdraw (approved leave needs your manager).');
+    if (mine.length > 1) fail(`You have ${mine.length} pending requests (${mine.map((l) => l.from).join(', ')}); which one?`);
+    const l = mine[0];
+    await commit(ctx, { leaves: { delete: [l.id] } }, [{ action: 'Leave request withdrawn', details: `${ctx.user.name} — ${l.from}`, entity: 'leave', entityId: l.id }]);
+    return { requested: `Withdrew your ${l.type} leave request from ${l.from}` };
+  },
+
+  async generate_payroll(input, ctx) {
+    needRole(ctx, ['admin', 'finance'], 'run payroll');
+    const out = await IMPL.get_payroll({ month: input.month }, ctx);
+    const v = S.Store.data;
+    if (!out.rows.length) fail(`Nobody has a salary set for ${out.month}. Add salaries with update_team_member first.`);
+    ctx.navigate = `#/payroll?month=${out.month}`;
+    ctx.actions.push({ action: 'payrollExport', month: out.month });
+    const who = norm(input.salary_slip_for);
+    if (who) {
+      const people = v.users.filter((u) => u.role !== 'client' && u.status !== 'Inactive' && u.ctc && (!u.joinDate || u.joinDate <= out.month + '-31'));
+      const list = /^(everyone|all|every one)$/.test(who) ? people : [pickOne('person', people, input.salary_slip_for, (u) => u.name)];
+      list.slice(0, 15).forEach((u) => ctx.actions.push({ action: 'salarySlip', userId: u.id, month: out.month }));
+    }
+    await db.appendActivity([{ userId: ctx.user.id, userName: ctx.user.name, action: 'Payroll generated', details: `${S.fmtMonth(out.month)} — ${out.people} people, gross ${rupees(out.gross_total)}, net ${rupees(out.net_total)} (via AI assistant)`, entity: 'payroll' }]);
+    return { ...out, downloaded: 'Payroll sheet (Excel)', salary_slips: who ? 'opened' : undefined, note: out.in_progress ? 'This month is still in progress, so figures will change.' : undefined };
+  },
+
+  async export_report(input, ctx) {
+    const r = norm(input.report).replace(/ .*/, '');
+    const map = { revenue: ['admin', 'pm', 'finance'], gst: ['admin', 'pm', 'finance'], deliverables: ['admin', 'pm'], delivery: ['admin', 'pm'], payroll: ['admin', 'finance'], invoices: ['admin', 'pm', 'finance'], clients: ['admin', 'pm'], tasks: ['admin', 'pm'], attendance: ['admin', 'pm', 'finance'] };
+    if (!map[r]) fail('Reports: revenue, gst, deliverables, payroll, invoices, clients, tasks or attendance.');
+    needRole(ctx, map[r], `export the ${r} report`);
+    const mm = (x) => (/^\d{4}-\d{2}$/.test(x || '') ? x : null);
+    let clientId;
+    if (input.client) { const v = bind(await viewFor(ctx.user)); clientId = findClient(v, input.client).id; }
+    ctx.actions.push({ action: 'export', report: r === 'delivery' ? 'deliverables' : r, from: mm(input.from), to: mm(input.to), clientId });
+    return { downloading: `${r} report`, range: mm(input.from) || mm(input.to) ? `${mm(input.from) || '…'} to ${mm(input.to) || '…'}` : 'default range' };
+  },
+
+  async update_settings({ changes }, ctx) {
+    needRole(ctx, ['admin'], 'change settings');
+    if (!changes || typeof changes !== 'object' || !Object.keys(changes).length) fail('Which settings should change?');
+    const blocked = ['invoiceSeq', 'webhookUrl', 'require2fa', 'aiDisabled', 'attendanceStartDate', 'billingStartMonth'].filter((k) => k in changes);
+    if (blocked.length) fail(`For safety, change ${blocked.join(', ')} on the Settings page yourself.`);
+    const cur = await db.getSettings();
+    const next = { ...cur, ...changes };
+    const { clean } = require('../validate');
+    const chk = clean('settings', next);
+    if (!chk.ok) fail(`Not valid: ${chk.error}`);
+    const unknown = Object.keys(changes).filter((k) => !(k in chk.doc));
+    if (unknown.length) fail(`Unknown setting${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}.`);
+    const lines = Object.keys(changes).map((k) => `${k}: ${JSON.stringify(cur[k])} → ${JSON.stringify(chk.doc[k])}`);
+    return {
+      summary: `Change settings — ${lines.join('; ')}`,
+      run: async () => {
+        const r = await applySync(ctx.user, { settings: chk.doc, activity: [{ action: 'Settings updated', details: `${Object.keys(changes).join(', ')} (via AI assistant)`, entity: 'settings' }] }, ctx.ip);
+        if (r.rejected || r.invalid.length) fail('Settings were not saved.');
+        ctx.changed = true;
+        return { updated: 'Settings', changes: lines };
+      },
+    };
   },
 
   async open_page(input, ctx) {

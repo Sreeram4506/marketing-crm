@@ -327,6 +327,99 @@ test('HR by voice: add a team member with a salary (after confirming), then they
   assert.ok((await data('admin')).activity.some((a) => a.action === 'Employee added' && /Mulukuri Sreeram.*via AI assistant/.test(a.details)));
 });
 
+/* Proposes an action, checks nothing changed yet, then confirms it in the next turn */
+async function proposeAndConfirm(who, call, check) {
+  let id, summary;
+  mock.reply(call, (body) => { const r = mock.lastToolResult(body).data; assert.equal(r.needs_confirmation, true, JSON.stringify(r)); id = r.confirmation_id; summary = r.summary; return mock.text('Shall I go ahead?'); });
+  const r1 = await ask(who, 'please do it');
+  if (check) await check(summary);
+  mock.reply(() => mock.tool('confirm_action', { confirmation_id: id }), (body) => { const d = mock.lastToolResult(body).data; assert.equal(d.ok, true, JSON.stringify(d)); return mock.text('Done.'); });
+  return ask(who, 'Yes', { conversationId: r1.conversationId });
+}
+
+test('does the whole app: billing — one-off invoice, dispute, wrong payment removed, PDF opened', async () => {
+  const r = await proposeAndConfirm('fin', mock.tool('create_invoice', { client: 'Apollo', description: '2 extra reel revisions', amount: 4000 }), async (summary) => {
+    assert.match(summary, /₹4,000 \+ GST = ₹4,720/);
+    assert.ok(!(await data('fin')).invoices.some((p) => p.description === '2 extra reel revisions'));
+  });
+  const inv = (await data('fin')).invoices.find((p) => p.description === '2 extra reel revisions');
+  assert.ok(inv && inv.invoiceNo && inv.manual && inv.amountDue === 4720);
+  assert.equal(r.of('do')[0].action, 'invoicePdf', 'the new invoice opens as a PDF');
+  mock.reply(mock.tool('invoice_dispute', { invoice: inv.invoiceNo, action: 'open', reason: 'Client says only one revision' }), mock.text('Marked.'));
+  await ask('fin', 'Mark it disputed');
+  assert.equal((await data('fin')).invoices.find((p) => p.id === inv.id).status, 'In Dispute');
+  mock.reply(mock.tool('invoice_dispute', { invoice: inv.invoiceNo, action: 'resolve' }), mock.text('Resolved.'));
+  await ask('fin', 'Resolve the dispute');
+  await proposeAndConfirm('fin', mock.tool('record_payment', { invoice: inv.invoiceNo, amount: 1000, mode: 'UPI', reference: 'UPI/OOPS' }));
+  await proposeAndConfirm('fin', mock.tool('remove_payment', { invoice: inv.invoiceNo, reference: 'UPI/OOPS' }));
+  assert.equal((await data('fin')).invoices.find((p) => p.id === inv.id).amountPaid, 0);
+});
+
+test('does the whole app: clients — fee change needs a yes, onboarding, referral; notes save straight away', async () => {
+  mock.reply(mock.tool('update_client', { client: 'Apollo', note: 'Prefers calls after 4pm', whatsapp: '9876500000' }), (body) => { assert.deepEqual(mock.lastToolResult(body).data.changes, ['note added', 'whatsapp updated']); return mock.text('Saved.'); });
+  await ask('pm1', 'Note that Apollo prefers calls after 4pm');
+  await proposeAndConfirm('admin', mock.tool('update_client', { client: 'Apollo', monthly_fee: 99000, reels: 10 }), async (summary) => assert.match(summary, /fee ₹95,000 → ₹99,000\/month; quota 10 reels/));
+  const apollo = (await data('admin')).clients.find((c) => c.id === 'c_apollo');
+  assert.equal(apollo.package.monthlyFee, 99000); assert.equal(apollo.package.quotas.reel, 10);
+  mock.reply(mock.tool('referral', { client: 'Apollo', business: 'Bright Smiles Clinic', status: 'Lead', credit: 5000 }), mock.text('Logged.'));
+  await ask('pm1', 'Apollo referred Bright Smiles Clinic, 5k credit');
+  assert.ok((await data('admin')).clients.find((c) => c.id === 'c_apollo').referrals.some((x) => x.name === 'Bright Smiles Clinic' && x.credit === 5000));
+  const ob = (await data('admin')).clients.find((c) => c.status === 'Onboarding');
+  mock.reply(mock.tool('client_onboarding', { client: ob.company, step: '3' }), mock.text('Ticked.'));
+  await ask('admin', 'Tick step 3');
+  assert.equal((await data('admin')).clients.find((c) => c.id === ob.id).onboarding[2].done, true);
+});
+
+test('does the whole app: production — revisions, shoot kit, timer, delete with confirmation', async () => {
+  const shoot = (await data('admin')).tasks.find((t) => t.type === 'shoot' && !['Published', 'Ready to Publish'].includes(t.status));
+  mock.reply(mock.tool('update_task', { task: shoot.id, checklist: 'all', shoot_time: '11:30' }), mock.text('Done.'));
+  await ask('admin', 'Kit is packed, move the shoot to 11:30');
+  const s2 = (await data('admin')).tasks.find((t) => t.id === shoot.id);
+  assert.equal(s2.shoot.time, '11:30'); assert.equal(Object.values(s2.shoot.checklist).filter(Boolean).length, 7, "every kit item ticked");
+  mock.reply(mock.tool('update_task', { task: shoot.id, client_revision: true }), mock.text('Logged.'));
+  await ask('admin', 'Client asked for another revision');
+  assert.equal((await data('admin')).tasks.find((t) => t.id === shoot.id).revisions, (shoot.revisions || 0) + 1);
+  const mine = (await data('des')).tasks.find((t) => t.assigneeId === 'u_des1' && !['Published', 'Ready to Publish'].includes(t.status));
+  mock.reply(mock.tool('task_timer', { action: 'start', task: mine.id }), mock.text('Started.'));
+  await ask('des', 'Start my timer');
+  assert.equal((await data('des')).users.find((u) => u.id === 'u_des1').timer.taskId, mine.id);
+  mock.reply(mock.tool('task_timer', { action: 'stop' }), mock.text('Stopped.'));
+  await ask('des', 'Stop the timer');
+  assert.equal((await data('des')).users.find((u) => u.id === 'u_des1').timer, null);
+  assert.ok((await data('des')).tasks.find((t) => t.id === mine.id).timeLogs.length >= 1);
+  mock.reply(mock.tool('delete_task', { task: mine.id }), (body) => { assert.match(mock.lastToolResult(body).data.error, /can't delete tasks/); return mock.text('No.'); });
+  await ask('des', 'Delete it');
+  await proposeAndConfirm('admin', mock.tool('delete_task', { task: mine.id }));
+  assert.ok(!(await data('admin')).tasks.some((t) => t.id === mine.id));
+});
+
+test('does the whole app: payroll generated with a download, slips, reports, attendance fixes, settings', async () => {
+  mock.reply(mock.tool('generate_payroll', { month: '2026-09', salary_slip_for: 'everyone' }), (body) => { const d = mock.lastToolResult(body).data; assert.ok(d.rows.length >= 5 && d.net_total > 0); return mock.text('Payroll is ready.'); });
+  const r = await ask('fin', 'Generate September payroll with slips');
+  assert.equal(r.of('navigate')[0].route, '#/payroll?month=2026-09');
+  assert.equal(r.of('do')[0].action, 'payrollExport');
+  assert.ok(r.of('do').filter((x) => x.action === 'salarySlip').length >= 5);
+  assert.ok((await data('admin')).activity.some((a) => a.action === 'Payroll generated'));
+  mock.reply(mock.tool('generate_payroll', {}), (body) => { assert.match(mock.lastToolResult(body).data.error, /can't run payroll/); return mock.text('No.'); });
+  await ask('pm1', 'Run payroll');
+  mock.reply(mock.tool('export_report', { report: 'gst', from: '2026-07', to: '2026-09' }), mock.text('Downloading.'));
+  const g = await ask('fin', 'Export the GST register for last quarter');
+  assert.deepEqual(g.of('do')[0], { type: 'do', action: 'export', report: 'gst', from: '2026-07', to: '2026-09' });
+  await proposeAndConfirm('admin', mock.tool('correct_attendance', { person: 'Arjun', date: '2026-09-15', clock_in: '09:40', clock_out: '18:10' }));
+  const att = (await data('admin')).attendance.find((a) => a.userId === 'u_des1' && a.date === '2026-09-15');
+  assert.equal(new Date(att.clockOut).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' }), '18:10');
+  mock.reply(mock.tool('update_settings', { changes: { webhookUrl: 'https://evil.example' } }), (body) => { assert.match(mock.lastToolResult(body).data.error, /Settings page yourself/); return mock.text('No.'); });
+  await ask('admin', 'Change the webhook');
+  await proposeAndConfirm('admin', mock.tool('update_settings', { changes: { maxRevisions: 3, graceMinutes: 20 } }));
+  const st = (await data('admin')).settings;
+  assert.equal(st.maxRevisions, 3); assert.equal(st.graceMinutes, 20);
+  mock.reply(mock.tool('request_leave', { type: 'casual', from: '2031-06-02', reason: 'Bank work' }), mock.text('ok'));
+  await ask('des', 'Leave on 2 June 2031');
+  mock.reply(mock.tool('withdraw_leave', { from: '2031-06-02' }), mock.text('Withdrawn.'));
+  await ask('des', 'Cancel that leave');
+  assert.ok(!(await data('des')).leaves.some((l) => l.reason === 'Bank work'));
+});
+
 test('refusals, API failures and bad requests are handled cleanly', async () => {
   mock.reply(mock.refusal('I can’t help with that.'));
   const r = await ask('admin', 'something');

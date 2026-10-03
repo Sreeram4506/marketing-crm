@@ -224,8 +224,15 @@ Views.payroll = function (main, _id, params = {}) {
     ...rows.map(({ u, p }) => [u.name, u.designation, p.monthly, p.basic, p.hra, p.special, p.workDays, p.lop, p.lopAmt, p.pf, p.pt, p.tds, p.net, u.bank.account, u.bank.ifsc])], `payroll-${mk}`, 'Payroll');
 };
 function openSlip(u, mk) {
+  const p = payslip(u, mk);
+  openDocModal(`Salary slip — ${u.name}`, slipHTML(u, mk), slipFile(u, mk));
+  Store.log('Salary slip generated', `${u.name} — ${fmtMonth(mk)} (net ${inr(p.net)})`, { entity: 'employee', entityId: u.id });
+  Store.save();
+}
+const slipFile = (u, mk) => `salary-slip-${u.name.replace(/\s+/g, '-')}-${mk}.html`;
+function slipHTML(u, mk) {
   const p = payslip(u, mk), s = Store.settings;
-  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Salary slip — ${esc(u.name)} — ${fmtMonth(mk)}</title><style>${DOC_CSS} .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}</style></head><body>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Salary slip — ${esc(u.name)} — ${fmtMonth(mk)}</title><style>${DOC_CSS} .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}</style></head><body>
     <div class="noprint">Press Ctrl + P (⌘ + P on Mac) to print or save as PDF</div><div class="doc">
     <div class="top"><div><b style="font-size:17px">${esc(s.agencyName)}</b><div class="muted">${esc(s.agencyAddress)}</div></div><div class="meta"><h1>SALARY SLIP</h1><div>${fmtMonth(mk)}</div></div></div>
     <table style="margin-top:18px"><tbody><tr><td>Employee</td><td><b>${esc(u.name)}</b></td><td>Designation</td><td>${esc(u.designation)}</td></tr>
@@ -236,7 +243,4 @@ function openSlip(u, mk) {
     <div class="totals"><div class="grand"><span>Net pay</span><span>${inr(p.net)}</span></div></div>
     <div class="words">Indian Rupees ${numberToWordsIN(p.net)} Only</div>
     <p class="muted" style="margin-top:28px">This is a computer-generated salary slip.</p></div></body></html>`;
-  openDocModal(`Salary slip — ${u.name}`, html, `salary-slip-${u.name.replace(/\s+/g, '-')}-${mk}.html`);
-  Store.log('Salary slip generated', `${u.name} — ${fmtMonth(mk)} (net ${inr(p.net)})`, { entity: 'employee', entityId: u.id });
-  Store.save();
 }

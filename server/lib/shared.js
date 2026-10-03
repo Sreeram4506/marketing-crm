@@ -11,7 +11,7 @@ const EXPORTS = ['Store', 'Perm', 'DATA_VERSION', 'ROLES', 'generateInvoices', '
   'CATEGORIES', 'CLIENT_STATUSES', 'SENTIMENTS', 'PAYMENT_TERMS', 'SHOOT_TYPES', 'SHOOT_LOCATIONS', 'PAYMENT_MODES', 'TASK_TYPES', 'PRIORITIES', 'TASK_STATUSES',
   'BREAK_TYPES', 'LEAVE_TYPES', 'LEAVE_STATUSES', 'EMPLOYEE_STATUSES', 'WORK_ARRANGEMENTS', 'DEPARTMENTS', 'QUOTA_TYPES', 'DONE_STATUSES', 'leaveDays',
   'quotaStatus', 'burnRate', 'expectedPct', 'isLate', 'isAtRisk', 'liveStatus', 'attendanceFor', 'openBreak', 'workedMs', 'leaveBalance', 'dayStatus',
-  'newTask', 'taskType', 'planMonthFor', 'missedMilestone', 'daysOverdue', 'monthKey', 'addDays', 'addMonths', 'daysInMonth', 'fmtDateTime', 'inrShort', 'REVIEW_STATUSES', 'ONBOARDING_STEPS', 'payslip'];
+  'newTask', 'taskType', 'planMonthFor', 'missedMilestone', 'daysOverdue', 'monthKey', 'addDays', 'addMonths', 'daysInMonth', 'fmtDateTime', 'inrShort', 'REVIEW_STATUSES', 'ONBOARDING_STEPS', 'payslip', 'makeInvoice', 'SHOOT_CHECKLIST'];
 
 function load() {
   const code = ['js/core.js', 'js/seed.js'].map((f) => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n;\n');

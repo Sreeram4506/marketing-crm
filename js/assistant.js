@@ -174,6 +174,7 @@ const Assistant = {
     try { await Api.flush(); } catch (e) {} // save any edits first so the co-pilot sees them
     const ctl = new AbortController(); this.abort = ctl;
     let changed = false, navigate = null;
+    const actions = [];
     const speakIt = mode === 'voice' && !this.muted;
     try {
       const res = await fetch(Api.base + '/api/assistant', { method: 'POST', signal: ctl.signal,
@@ -203,6 +204,7 @@ const Assistant = {
             this.setState(ev.status === 'running' ? `${ev.label}…` : 'Thinking…', 'thinking');
           } else if (ev.type === 'confirm') bot.confirms.push({ id: ev.id, summary: ev.summary });
           else if (ev.type === 'navigate') navigate = ev.route;
+          else if (ev.type === 'do') actions.push(ev);
           else if (ev.type === 'error') bot.error = ev.message;
           else if (ev.type === 'done') changed = ev.changed;
           this.renderLog();
@@ -220,7 +222,38 @@ const Assistant = {
     if (changed) { try { await Store.load(); } catch (e) {} this.loadSignals(); }
     if (navigate && navigate !== location.hash) location.hash = navigate;
     else if (changed) Router.render();
+    if (actions.length) await this.runActions(actions);
     if (!this.speaking) this.afterReply();
+  },
+  /* Documents and downloads the co-founder asked for: these reuse the pages' own export and print code */
+  async runActions(list) {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const go = async (hash) => { if (location.hash === hash) Router.render(); else location.hash = hash; await wait(350); };
+    const click = (sel) => { const b = document.querySelector(sel); if (b) b.click(); else toast('Couldn’t find that export on the page.', 'warn'); };
+    const slips = list.filter((a) => a.action === 'salarySlip');
+    for (const a of list) {
+      try {
+        if (a.action === 'invoicePdf') { const p = Store.payments.find((x) => x.id === a.invoiceId); if (p) openInvoice(p); }
+        else if (a.action === 'payrollExport') { await go(`#/payroll?month=${a.month}`); click('#expPay'); }
+        else if (a.action === 'export') {
+          const r = a.report;
+          if (r === 'payroll') { await go(`#/payroll?month=${a.to || a.from || addMonths(monthKey(), -1)}`); click('#expPay'); }
+          else if (['revenue', 'gst'].includes(r)) { Object.assign(reportState, { from: a.from || reportState.from || addMonths(monthKey(), -2), to: a.to || reportState.to || monthKey() }); await go(`#/reports?tab=${r}`); click('#rXls'); }
+          else if (r === 'deliverables') { Object.assign(reportState, { month: a.to || a.from || monthKey(), client: a.clientId || '' }); await go('#/reports?tab=delivery'); click('#dXls'); }
+          else if (r === 'invoices') { payState.allMonths = !a.from && !a.to; if (a.from || a.to) payState.month = a.to || a.from; await go('#/payments'); click('#expPay'); }
+          else if (r === 'attendance') { await go('#/team?tab=attendance'); click('#expAtt'); }
+          else if (r === 'tasks') exportExcel(taskRows(Store.tasks.filter((t) => !a.clientId || t.clientId === a.clientId)), 'tasks', 'Tasks');
+          else if (r === 'clients') exportExcel([['Client', 'Status', 'Category', 'Contact', 'Phone', 'Email', 'Package', 'Monthly fee', 'Billing day', 'Payment terms', 'Contract end', 'Sentiment', 'Manager'],
+            ...Store.clients.filter((c) => !c.archived).map((c) => [c.company, c.status, c.category, c.contact, c.phone, c.email, c.package.name, c.package.monthlyFee, c.package.billingDay, c.package.paymentTerms, c.package.endDate || '', c.sentiment, Store.userName(c.managerId)])], 'clients', 'Clients');
+        }
+      } catch (e) { toast('Couldn’t prepare that file: ' + e.message, 'error'); }
+    }
+    // One slip opens for preview; several are downloaded as files (open each and print / save as PDF)
+    if (slips.length === 1) { const u = Store.user(slips[0].userId); if (u) openSlip(u, slips[0].month); }
+    else if (slips.length > 1) {
+      for (const sl of slips) { const u = Store.user(sl.userId); if (u) { downloadBlob(slipHTML(u, sl.month), slipFile(u, sl.month), 'text/html'); await wait(250); } }
+      toast(`${slips.length} salary slips downloaded`);
+    }
   },
   /* Hands-free: start listening again once the reply has been spoken */
   afterReply() {

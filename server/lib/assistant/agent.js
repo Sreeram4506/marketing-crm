@@ -36,8 +36,9 @@ How to act:
 - Do things, don't describe how. When the user asks for an action, call the tool. Chain tools when needed (e.g. search, then update). Never claim something was done unless a tool confirmed it.
 - Never invent numbers, names or dates. Every fact about the business comes from a tool result. If a tool says something isn't allowed for their role, tell them plainly.
 - Resolve vague references yourself with search / get_client; ask a short question only when it's genuinely ambiguous.
+- You can do everything the app can: clients (edit details, fees, quotas, onboarding, referrals, archive), production (create, move, edit, delete tasks; shoots, crew and kit checklist; client revisions; timers), billing (one-off invoices, payments, disputes, removing wrong entries, sending reminders, invoice PDFs), team (attendance corrections, leave), payroll (generate the month's payroll sheet and salary slips), reports (Excel exports) and settings. If something truly isn't possible by tool (uploading files, passwords, client portal logins, restoring backups), say so and open the right page.
 - You can run HR too: add team members (ask for their work email if not given — never make one up), change salaries, roles and status, and read payroll. Payroll is calculated from each person's salary, so "add a payroll entry of 25,000" for someone means setting their monthly salary to 25,000 (adding them as a team member first if they don't exist). Never ask for or store bank or ID numbers; those are entered on the person's profile.
-- Some actions (recording payments, adding clients, approving or rejecting leave, bulk planning, adding team members, changing employee details) come back as "needs confirmation" with a summary. Read the summary back in one sentence and ask "Shall I go ahead?". Only call confirm_action after the user clearly agrees in a new message. If they change details, propose the action again.
+- Actions that move money, change pay, delete things or change settings (and some others) come back as "needs confirmation" with a summary. Read the summary back in one sentence and ask "Shall I go ahead?". Only call confirm_action after the user clearly agrees in a new message. If they change details, propose the action again.
 - Clocking out needs a one-line end-of-day summary; if they haven't said what they did, ask.
 - Dates: convert "today", "tomorrow", "Friday", "next week" to YYYY-MM-DD using the date in the context. Money is Indian rupees; say amounts the Indian way (e.g. "1.2 lakh", "45 thousand").
 - Use open_page when the user asks to see or open something, or when showing a screen clearly helps.
@@ -48,13 +49,17 @@ How to speak:
 - In voice mode your words are read aloud: two to four short sentences, natural spoken English, no markdown, no bullet points, no tables, no emoji, no IDs or URLs. Lead with the answer or your recommendation.
 - In text mode be brief and direct; short lists are fine for priorities or several items. Use plain text with "- " for lists, no headings or tables.`;
 
-const DONE_LABELS = { record_payment: 'Payment recorded', create_client: 'Client added', decide_leave: 'Leave decision saved', plan_month: 'Month planned', add_team_member: 'Team member added', update_team_member: 'Employee updated' };
+const DONE_LABELS = { record_payment: 'Payment recorded', create_client: 'Client added', decide_leave: 'Leave decision saved', plan_month: 'Month planned', add_team_member: 'Team member added', update_team_member: 'Employee updated',
+  delete_task: 'Task deleted', create_invoice: 'Invoice created', remove_payment: 'Payment entry removed', send_reminders: 'Reminders sent', correct_attendance: 'Attendance corrected', update_settings: 'Settings saved', update_client: 'Client updated' };
 const TOOLS = DEFINITIONS.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.input_schema, strict: false }));
 const LABELS = {
   get_overview: 'Checking the business', search: 'Searching', get_client: 'Looking up the client', list_tasks: 'Checking tasks', list_invoices: 'Checking invoices', get_team: 'Checking the team',
   get_my_day: 'Checking your day', create_task: 'Creating task', update_task: 'Updating task', record_payment: 'Preparing payment', create_client: 'Preparing new client', update_client: 'Updating client',
   log_feedback: 'Logging feedback', request_leave: 'Requesting leave', decide_leave: 'Preparing leave decision', attendance: 'Updating attendance', draft_reminder: 'Drafting reminder', plan_month: 'Planning the month',
   open_page: 'Opening page', confirm_action: 'Carrying it out', business_review: 'Reviewing the business', remember: 'Remembering', forget: 'Forgetting',
+  update_client: 'Updating client', client_onboarding: 'Updating onboarding', referral: 'Saving referral', delete_task: 'Preparing to delete task', task_timer: 'Timer',
+  create_invoice: 'Preparing invoice', invoice_dispute: 'Updating invoice', remove_payment: 'Preparing payment removal', send_reminders: 'Preparing reminders', invoice_pdf: 'Opening invoice',
+  correct_attendance: 'Preparing attendance correction', withdraw_leave: 'Withdrawing leave', generate_payroll: 'Generating payroll', export_report: 'Preparing report', update_settings: 'Preparing settings change',
   add_team_member: 'Preparing new team member', update_team_member: 'Preparing employee change', get_payroll: 'Checking payroll',
 };
 
@@ -90,13 +95,13 @@ async function runTool(call, convo, ctx, send) {
       if (p.turn >= convo.turn) throw new ToolError('The user has not replied yet. Ask them to confirm first, then wait for their answer.');
       convo.pending.delete(p.id);
       const fresh = await IMPL[p.tool](p.input, ctx); // re-validate against current data before acting
-      const out = await fresh.run();
+      const out = typeof fresh.run === 'function' ? await fresh.run() : fresh;
       send({ type: 'tool', id: call.id, name: p.tool, label: DONE_LABELS[p.tool] || LABELS[p.tool], status: 'done', summary: fresh.summary });
       return result({ ok: true, ...out });
     }
     if (!IMPL[name]) throw new ToolError(`Unknown tool ${name}`);
     const out = await IMPL[name](input, ctx);
-    if (NEEDS_CONFIRMATION.has(name)) {
+    if (NEEDS_CONFIRMATION.has(name) || (out && typeof out.run === 'function')) {
       const id = `c${crypto.randomBytes(4).toString('hex')}`;
       convo.pending.set(id, { id, tool: name, input, turn: convo.turn });
       send({ type: 'confirm', id, tool: name, summary: out.summary });
@@ -125,6 +130,11 @@ function summarise(name, out) {
   if (out.updated) return `${out.updated}: ${(out.changes || []).join(', ')}`;
   if (out.opened) return out.page || out.opened;
   if (out.remembered) return out.remembered;
+  if (out.timer_started) return `Timer on ${out.timer_started}`;
+  if (out.timer_stopped) return `${out.timer_stopped} · ${out.time}`;
+  if (out.downloading) return out.downloading;
+  if (out.deleted) return out.deleted;
+  if (name === 'generate_payroll') return `${shared.fmtMonth(out.month)} · ${out.people} people · net ${shared.inr(out.net_total)}`;
   if (name === 'get_payroll') return `${out.people} people · net ${shared.inr(out.net_total)}`;
   if (out.forgot) return out.forgot;
   if (name === 'business_review' && out.signals) return out.signals.length ? `${out.signals.length} thing${out.signals.length > 1 ? 's' : ''} worth attention` : 'All looks healthy';
@@ -181,7 +191,7 @@ async function chat({ user, ip, conversationId, message, mode, page, send }) {
   convo.turn++;
   convo.updatedAt = Date.now();
   send({ type: 'start', conversationId: convo.id, reset });
-  const ctx = { user, ip, changed: false, navigate: null };
+  const ctx = { user, ip, changed: false, navigate: null, actions: [] };
   // Long-term memory rides along on the first turn and whenever it has changed since
   let mem = '';
   if (convo.memoryVersion !== memory.version) {
@@ -201,6 +211,7 @@ async function chat({ user, ip, conversationId, message, mode, page, send }) {
     if (n === MAX_STEPS - 1) send({ type: 'text', delta: ' I had to stop there — that needed too many steps. Could you break it into smaller requests?' });
   }
   if (ctx.navigate) send({ type: 'navigate', route: ctx.navigate });
+  ctx.actions.slice(0, 20).forEach((a) => send({ type: 'do', ...a })); // downloads and documents the browser makes (payroll sheet, slips, invoice PDFs, reports)
   send({ type: 'done', changed: ctx.changed, pending: [...convo.pending.values()].filter((p) => p.turn === convo.turn).map((p) => p.id) });
 }
 
