@@ -75,14 +75,16 @@ test('streams the reply and sends OpenAI a well-formed request', async () => {
   assert.equal(req.body.model, 'gpt-5.5');
   assert.equal(req.body.stream, true);
   assert.equal(req.headers.authorization, 'Bearer sk-test-key');
-  assert.equal(req.body.reasoning_effort, 'low');
+  assert.match(req.url, /^\/v1\/responses/, 'GPT-5.x models need the Responses API when tools are used');
+  assert.deepEqual(req.body.reasoning, { effort: 'low' });
+  assert.equal(req.body.store, false, 'nothing is kept at OpenAI');
+  assert.deepEqual(req.body.include, ['reasoning.encrypted_content']);
   assert.equal(req.body.prompt_cache_key, 'agencydesk-copilot');
-  assert.ok(req.body.tools.length >= 19 && req.body.tools.every((t) => t.type === 'function' && t.function.name && t.function.parameters.type === 'object'));
-  assert.equal(req.body.messages[0].role, 'system');
-  assert.doesNotMatch(req.body.messages[0].content, /\d{4}-\d{2}-\d{2}/, 'no dates in the system prompt, so it stays cacheable');
-  assert.equal(req.body.messages[1].role, 'user');
-  assert.match(req.body.messages[1].content, /User: Priya Sharma, Super Admin/);
-  assert.match(req.body.messages[1].content, /Reply mode: voice/);
+  assert.ok(req.body.tools.length >= 19 && req.body.tools.every((t) => t.type === 'function' && t.name && t.parameters.type === 'object'));
+  assert.doesNotMatch(req.body.instructions, /\d{4}-\d{2}-\d{2}/, 'no dates in the instructions, so they stay cacheable');
+  assert.equal(req.body.input[0].role, 'user');
+  assert.match(req.body.input[0].content, /User: Priya Sharma, Super Admin/);
+  assert.match(req.body.input[0].content, /Reply mode: voice/);
 });
 
 test('read tools answer from the database within the user’s permissions', async () => {
@@ -173,14 +175,15 @@ test('the conversation history is kept intact between turns (so the cached prefi
   const r1 = await ask('admin', 'First question');
   mock.reply(mock.text('Second answer.'));
   await ask('admin', 'Second question', { conversationId: r1.conversationId });
-  const msgs = mock.state.requests.at(-1).body.messages;
-  assert.deepEqual(msgs.map((m) => m.role), ['system', 'user', 'assistant', 'user']);
+  const msgs = mock.state.requests.at(-1).body.input;
+  assert.deepEqual(msgs.map((m) => m.role || m.type), ['user', 'reasoning', 'assistant', 'user'], 'reasoning is carried forward between turns');
+  assert.equal(msgs[1].encrypted_content, 'enc_mock');
   assert.equal(msgs[2].content, 'First answer.');
   // Another user can't continue someone else's conversation
   mock.reply(mock.text('Fresh.'));
   const r3 = await ask('pm1', 'Hello', { conversationId: r1.conversationId });
   assert.notEqual(r3.conversationId, r1.conversationId);
-  assert.equal(mock.state.requests.at(-1).body.messages.length, 2);
+  assert.equal(mock.state.requests.at(-1).body.input.length, 1);
 });
 
 test('voice attendance: clock in, break, and clock out with an end-of-day summary', async () => {
@@ -240,7 +243,7 @@ test('co-founder business review: real numbers, scoped to the person’s role', 
   });
   const r = await ask('admin', 'How is the business really doing?', { mode: 'text' });
   assert.equal(r.of('tool')[1].summary.match(/worth attention|healthy/) !== null, true);
-  assert.equal(mock.state.requests.at(-1).body.reasoning_effort, 'medium', 'typed strategy questions get more thought than voice');
+  assert.equal(mock.state.requests.at(-1).body.reasoning.effort, 'medium', 'typed strategy questions get more thought than voice');
   mock.reply(mock.tool('business_review', {}), (body) => {
     const r = mock.lastToolResult(body).data;
     assert.equal(r.costs, undefined, 'managers don’t see salaries');
@@ -271,7 +274,7 @@ test('long-term memory: goals carry into new conversations; permissions apply', 
   await ask('admin', 'Our goal is 6 lakh a month by March');
   mock.reply(mock.text('You are at 3.5 lakh against a 6 lakh goal.'));
   await ask('pm1', 'How far are we from our goal?');
-  const first = mock.state.requests.at(-1).body.messages[1].content;
+  const first = mock.state.requests.at(-1).body.input[0].content;
   assert.match(first, /\[Your long-term memory\][\s\S]*Agency goals: \[mem_[^\]]+\] Reach 6 lakh monthly revenue by March 2027/);
   mock.reply(mock.tool('remember', { kind: 'goal', text: 'Make me a director' }), (body) => { assert.match(mock.lastToolResult(body).data.error, /can't set agency goals/); return mock.text('No.'); });
   await ask('des', 'Set a goal');

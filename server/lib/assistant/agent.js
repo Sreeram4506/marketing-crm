@@ -1,4 +1,4 @@
-/* The AI co-pilot's conversation loop: OpenAI (Chat Completions) + AgencyDesk tools, streamed
+/* The AI co-founder's conversation loop: OpenAI Responses API + AgencyDesk tools, streamed
    to the browser as Server-Sent Events so speech can start before the reply finishes. */
 const crypto = require('crypto');
 const OpenAI = require('openai').default;
@@ -48,7 +48,7 @@ How to speak:
 - In text mode be brief and direct; short lists are fine for priorities or several items. Use plain text with "- " for lists, no headings or tables.`;
 
 const DONE_LABELS = { record_payment: 'Payment recorded', create_client: 'Client added', decide_leave: 'Leave decision saved', plan_month: 'Month planned' };
-const TOOLS = DEFINITIONS.map((t) => ({ type: 'function', function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+const TOOLS = DEFINITIONS.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.input_schema, strict: false }));
 const LABELS = {
   get_overview: 'Checking the business', search: 'Searching', get_client: 'Looking up the client', list_tasks: 'Checking tasks', list_invoices: 'Checking invoices', get_team: 'Checking the team',
   get_my_day: 'Checking your day', create_task: 'Creating task', update_task: 'Updating task', record_payment: 'Preparing payment', create_client: 'Preparing new client', update_client: 'Updating client',
@@ -73,11 +73,11 @@ function contextLine(user, { page, mode }) {
   return `[Context, set by the app — not typed by the user] Now: ${when} (IST); today's date is ${shared.todayISO()}. User: ${user.name}, ${shared.ROLES[user.role].label}. Their screen: ${String(page || '#/dashboard').slice(0, 80)}. Reply mode: ${mode === 'voice' ? 'voice (spoken aloud)' : 'text'}.`;
 }
 
-/* Runs one tool call; returns the role:'tool' message that answers it */
+/* Runs one tool call; returns the function_call_output item that answers it */
 async function runTool(call, convo, ctx, send) {
   const name = call.name;
   send({ type: 'tool', id: call.id, name, label: LABELS[name] || name, status: 'running' });
-  const result = (content) => ({ role: 'tool', tool_call_id: call.id, content: typeof content === 'string' ? content : JSON.stringify(content) });
+  const result = (content) => ({ type: 'function_call_output', call_id: call.id, output: typeof content === 'string' ? content : JSON.stringify(content) });
   try {
     let input;
     try { input = call.arguments ? JSON.parse(call.arguments) : {}; } catch (e) { throw new ToolError('The tool arguments were not valid JSON — try the call again.'); }
@@ -129,34 +129,47 @@ function summarise(name, out) {
   return '';
 }
 
-/* Streams one model step; returns the assembled text, tool calls and finish reason */
-async function step(messages, mode, send) {
-  const stream = await ai().chat.completions.create({
+/* Streams one model step; returns the streamed text, the output items to keep, and the tool calls.
+   Responses API (required for GPT-5.x reasoning models with tools). Nothing is stored at OpenAI
+   (store: false); reasoning comes back encrypted so it can be passed along on the next step. */
+async function step(input, mode, send) {
+  const stream = await ai().responses.create({
     model: MODEL,
     stream: true,
-    max_completion_tokens: 16000,
-    ...(REASONING ? { reasoning_effort: effortFor(mode) } : {}),
-    prompt_cache_key: 'agencydesk-copilot',
-    messages: [{ role: 'system', content: SYSTEM }, ...messages],
+    store: false,
+    instructions: SYSTEM,
+    input,
     tools: TOOLS,
+    max_output_tokens: 16000,
+    prompt_cache_key: 'agencydesk-copilot',
+    ...(REASONING ? { reasoning: { effort: effortFor(mode) }, include: ['reasoning.encrypted_content'] } : {}),
   });
-  let text = '', refusal = '', finish = null;
-  const calls = [];
-  for await (const chunk of stream) {
-    const choice = chunk.choices && chunk.choices[0];
-    if (!choice) continue;
-    const d = choice.delta || {};
-    if (d.content) { text += d.content; send({ type: 'text', delta: d.content }); }
-    if (d.refusal) refusal += d.refusal;
-    for (const tc of d.tool_calls || []) {
-      const c = (calls[tc.index] = calls[tc.index] || { id: '', name: '', arguments: '' });
-      if (tc.id) c.id = tc.id;
-      if (tc.function && tc.function.name) c.name += tc.function.name;
-      if (tc.function && tc.function.arguments) c.arguments += tc.function.arguments;
-    }
-    if (choice.finish_reason) finish = choice.finish_reason;
+  let text = '', refusal = '', final = null;
+  for await (const ev of stream) {
+    if (ev.type === 'response.output_text.delta') { text += ev.delta; send({ type: 'text', delta: ev.delta }); }
+    else if (ev.type === 'response.refusal.delta') refusal += ev.delta;
+    else if (ev.type === 'response.completed' || ev.type === 'response.incomplete') final = ev.response;
+    else if (ev.type === 'response.failed') throw Object.assign(new Error((ev.response && ev.response.error && ev.response.error.message) || 'The AI request failed'), { status: 500 });
+    else if (ev.type === 'error') throw Object.assign(new Error(ev.message || 'The AI request failed'), { status: 500 });
   }
-  return { text, refusal, finish, calls: calls.filter(Boolean) };
+  if (!final) throw Object.assign(new Error('The AI stream ended early'), { status: 502 });
+  const output = final.output || [];
+  // Keep reasoning (encrypted), assistant text and tool calls for the next request; drop server-only ids
+  const keep = output.flatMap((it) => {
+    if (it.type === 'reasoning') return it.encrypted_content ? [{ type: 'reasoning', id: it.id, summary: it.summary || [], encrypted_content: it.encrypted_content }] : [];
+    if (it.type === 'function_call') return [{ type: 'function_call', call_id: it.call_id, name: it.name, arguments: it.arguments }];
+    if (it.type === 'message') {
+      const t = (it.content || []).filter((c) => c.type === 'output_text').map((c) => c.text).join('');
+      if ((it.content || []).some((c) => c.type === 'refusal')) refusal = refusal || 'refused';
+      return t ? [{ role: 'assistant', content: t }] : [];
+    }
+    return [];
+  });
+  return {
+    text, refusal, keep,
+    incomplete: final.status === 'incomplete' ? ((final.incomplete_details && final.incomplete_details.reason) || 'incomplete') : null,
+    calls: output.filter((it) => it.type === 'function_call').map((it) => ({ id: it.call_id, name: it.name, arguments: it.arguments })),
+  };
 }
 
 /* One user turn: stream the model, run tools, repeat until it answers */
@@ -176,10 +189,10 @@ async function chat({ user, ip, conversationId, message, mode, page, send }) {
 
   for (let n = 0; n < MAX_STEPS; n++) {
     const r = await step(convo.messages, mode, send);
-    if (r.refusal || r.finish === 'content_filter') { send({ type: 'text', delta: "Sorry, I can't help with that one." }); break; }
+    if (r.refusal || r.incomplete === 'content_filter') { send({ type: 'text', delta: "Sorry, I can't help with that one." }); break; }
     // A reply cut off mid tool call can't be completed; don't keep it in the history
-    if (r.finish === 'length') { send({ type: 'text', delta: ' (That got cut off — try asking for less at once.)' }); break; }
-    convo.messages.push({ role: 'assistant', content: r.text || null, ...(r.calls.length ? { tool_calls: r.calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })) } : {}) });
+    if (r.incomplete) { send({ type: 'text', delta: ' (That got cut off — try asking for less at once.)' }); break; }
+    convo.messages.push(...r.keep);
     if (!r.calls.length) break;
     for (const c of r.calls) convo.messages.push(await runTool(c, convo, ctx, send)); // sequential: writes must not race each other
     if (n === MAX_STEPS - 1) send({ type: 'text', delta: ' I had to stop there — that needed too many steps. Could you break it into smaller requests?' });
@@ -194,7 +207,7 @@ function describeError(e) {
   if (e instanceof OpenAI.PermissionDeniedError) return 'The AI key does not have access to this model.';
   if (e instanceof OpenAI.NotFoundError) return `The AI model "${MODEL}" isn't available on this OpenAI account. Set AI_MODEL to one you can use.`;
   if (e instanceof OpenAI.RateLimitError) return /quota/i.test(e.message || '') ? 'The OpenAI account has run out of credit. An admin needs to top it up.' : 'The AI is busy right now — please try again in a few seconds.';
-  if (e instanceof OpenAI.BadRequestError) return 'The AI could not process that request.';
+  if (e instanceof OpenAI.BadRequestError) return `The AI could not process that request: ${String(e.message || '').replace(/^400\s*/, '').slice(0, 200)}`;
   if (e instanceof OpenAI.APIConnectionError) return 'Could not reach the AI service. Check the server’s internet connection.';
   if (e instanceof OpenAI.APIError) return `The AI service had a problem (${e.status || 'error'}). Please try again.`;
   return 'Something went wrong. Please try again.';
