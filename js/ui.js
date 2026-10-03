@@ -322,6 +322,7 @@ function renderShell(active) {
   $('.topbar-title').textContent = nav ? nav.label : '';
   $$('.theme-btn').forEach((b) => (b.onclick = toggleTheme));
   syncThemeIcon();
+  if (typeof Assistant !== 'undefined') Assistant.mount();
 }
 
 /* Leave requests this person can approve (not their own; PMs approve creative/shoot staff) */
@@ -354,6 +355,7 @@ function syncThemeIcon() { $$('.theme-btn').forEach((b) => (b.innerHTML = icon(c
 
 /* ---------- Login (choose team member) ---------- */
 function renderLogin() {
+  if (typeof Assistant !== 'undefined') Assistant.unmount();
   if (Api.mode === 'server') return renderServerLogin();
   const app = $('#app');
   const s = Store.settings;

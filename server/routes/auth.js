@@ -21,7 +21,7 @@ const hashCode = (c) => crypto.createHash('sha256').update(String(c).replace(/[\
 
 router.get('/setup-status', wrap(async (req, res) => {
   const s = await db.getSettings();
-  res.json({ needsSetup: (await db.col('users').countDocuments()) === 0, agencyName: s ? s.agencyName : 'AgencyDesk', emailEnabled: cfg.emailEnabled && !!cfg.appUrl });
+  res.json({ needsSetup: (await db.col('users').countDocuments()) === 0, agencyName: s ? s.agencyName : 'AgencyDesk', emailEnabled: cfg.emailEnabled && !!cfg.appUrl, aiEnabled: cfg.aiEnabled && !(s && s.aiDisabled), aiConfigured: cfg.aiEnabled });
 }));
 
 /* First run only: creates the workspace and the first admin */

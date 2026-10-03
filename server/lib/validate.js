@@ -104,7 +104,7 @@ const SETTINGS = obj({
   bankDetails: str(300), upiId: str(100), invoicePrefix: str(10), dueDays: int(0, 90), billingStartMonth: month, maxRevisions: int(0, 20),
   workStart: time, workEnd: time, graceMinutes: int(0, 180), halfDayHours: num(1, 12), weekOff: arr(int(0, 6), 7), pfEnabled: bool, captureIp: bool,
   webhookUrl: webhook, autoWebhook: bool, overloadThreshold: int(1, 100), attendanceStartDate: date, emailReminders: bool, notifyLeave: bool,
-  require2fa: arr(oneOf(ROLE_KEYS), 6),
+  require2fa: arr(oneOf(ROLE_KEYS), 6), aiDisabled: bool,
 });
 
 function clean(name, doc) {

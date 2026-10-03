@@ -57,10 +57,14 @@ Views.settings = function (main) {
       <p class="full muted small">Email: ${Api.info.emailEnabled ? '<b class="text-good">connected</b>' : '<b class="text-warn">not set up</b> — add RESEND_API_KEY, EMAIL_FROM and APP_URL on the server to enable invites, password resets and emailed reminders'}.</p>
       <label class="check full"><input type="checkbox" name="emailReminders" ${s.emailReminders ? 'checked' : ''} ${Api.info.emailEnabled ? '' : 'disabled'}> Email payment reminders directly to clients (3 days before and when overdue)</label>
       <label class="check full"><input type="checkbox" name="notifyLeave" ${s.notifyLeave !== false ? 'checked' : ''} ${Api.info.emailEnabled ? '' : 'disabled'}> Email managers about leave requests, and staff about decisions</label>
+      <h3 class="full form-section">AI co-founder</h3>
+      <p class="full muted small">Status: ${Api.info.aiConfigured ? (s.aiDisabled ? '<b class="text-warn">switched off</b>' : '<b class="text-good">connected</b>') : '<b class="text-warn">not set up</b> — add OPENAI_API_KEY on the server'}. Team members can talk or type to it (Ctrl + J). It reviews the business, flags risks, gives a daily briefing and remembers your goals; it acts with each person’s own permissions and asks before money, new clients or leave decisions. Every action is in the audit trail.</p>
+      <label class="check full"><input type="checkbox" name="aiOn" ${s.aiDisabled ? '' : 'checked'}> Turn on the AI co-founder for the team</label>
       <div class="field full"><span class="field-label">Require two-factor authentication for</span><div class="checks">${Object.entries(ROLES).map(([k, r]) => `<label class="check pill"><input type="checkbox" name="require2fa" value="${k}" ${(s.require2fa || []).includes(k) ? 'checked' : ''}> ${esc(r.label)}</label>`).join('')}</div>
         <span class="field-hint">People in these roles must set up an authenticator app at their next sign-in. Recommended: Super Admin and Finance.</span></div>` : ''}
       <div class="full row-actions"><button class="btn btn-primary" type="submit">Save settings</button>${s.webhookUrl ? `<button class="btn" type="button" id="testHook">${icon('send')}Send test</button>` : ''}</div>
     </div></section></form>
+    ${Api.mode === 'server' && Api.info.aiConfigured && !s.aiDisabled ? '<section class="card" id="aiMemory"><div class="card-head"><h2>What the co-founder remembers</h2></div><p class="muted small">Loading…</p></section>' : ''}
     ${Api.mode === 'server' ? `<section class="card"><div class="card-head"><h2>Data</h2></div><p class="muted small">Data is stored in MongoDB and shared by the whole team. Download a JSON export any time; for full restores use your MongoDB Atlas backups.</p>
       <div class="row-actions"><button class="btn" id="exportAll">${icon('download')}Download export</button></div></section>` : `<section class="card"><div class="card-head"><h2>Data</h2></div><p class="muted small">Demo mode: everything is stored in this browser. Download a backup regularly — it’s also how you move data to another computer.</p>
       <div class="row-actions"><button class="btn" id="backup">${icon('download')}Download backup</button>
@@ -68,6 +72,7 @@ Views.settings = function (main) {
         <button class="btn btn-ghost-danger" id="resetData">${icon('trash')}Reset to sample data</button></div></section>`}`;
   if ($('#exportAll')) $('#exportAll').onclick = async () => { try { const d = await Api.req('GET', '/export', null, { timeout: 60000 }); downloadBlob(JSON.stringify(d, null, 2), `agencydesk-export-${todayISO()}.json`, 'application/json'); } catch (e) { toast(e.message, 'error'); } };
   bindSettingsForm(s);
+  if ($('#aiMemory')) renderAiMemory($('#aiMemory'));
   if (Api.mode === 'server') return;
   $('#backup').onclick = () => downloadBlob(JSON.stringify(Store.data, null, 2), `agencydesk-backup-${todayISO()}.json`, 'application/json');
   $('#restore').onchange = async (e) => {
@@ -96,7 +101,8 @@ function bindSettingsForm(s) {
       gstRate: num('gstRate'), sac: d.sac.trim(), invoicePrefix: d.invoicePrefix.trim() || 'INV', dueDays: num('dueDays'), upiId: d.upiId.trim(), bankDetails: d.bankDetails.trim(),
       maxRevisions: num('maxRevisions'), overloadThreshold: Math.max(1, num('overloadThreshold')), workStart: d.workStart, workEnd: d.workEnd, graceMinutes: num('graceMinutes'), halfDayHours: Number(d.halfDayHours) || 4.5,
       weekOff: [].concat(d.weekOff || []).map(Number), captureIp: !!d.captureIp, pfEnabled: !!d.pfEnabled, webhookUrl: d.webhookUrl.trim(), autoWebhook: !!d.autoWebhook });
-    if (Api.mode === 'server') Object.assign(s, { emailReminders: Api.info.emailEnabled ? !!d.emailReminders : !!s.emailReminders, notifyLeave: Api.info.emailEnabled ? !!d.notifyLeave : s.notifyLeave !== false, require2fa: [].concat(d.require2fa || []) });
+    if (Api.mode === 'server') { Api.info.aiEnabled = !!Api.info.aiConfigured && !!d.aiOn; if (!d.aiOn && typeof Assistant !== 'undefined') Assistant.unmount(); }
+    if (Api.mode === 'server') Object.assign(s, { aiDisabled: !d.aiOn, emailReminders: Api.info.emailEnabled ? !!d.emailReminders : !!s.emailReminders, notifyLeave: Api.info.emailEnabled ? !!d.notifyLeave : s.notifyLeave !== false, require2fa: [].concat(d.require2fa || []) });
     Store.log('Settings updated', 'Agency, billing, attendance or automation settings changed');
     Store.save(); toast('Settings saved'); Router.render();
   };
@@ -136,3 +142,16 @@ async function boot() {
   setInterval(() => { if (tick().length) Router.render(); }, 3600 * 1000);
 }
 boot();
+
+/* Goals and notes the AI co-founder keeps between conversations (personal notes stay private to each person) */
+async function renderAiMemory(box) {
+  let items;
+  try { items = (await Api.req('GET', '/assistant/memory')).items.filter((m) => m.scope === 'agency'); } catch (e) { box.querySelector('p').textContent = e.message; return; }
+  const kindLabel = { goal: 'Goal', note: 'Note' };
+  box.innerHTML = `<div class="card-head"><h2>What the co-founder remembers</h2></div>
+    <p class="muted small">Agency goals and notes it uses in every conversation. Add more by telling it, e.g. “Remember our goal is 5 lakh monthly revenue by March.”</p>
+    ${items.length ? `<div class="ai-mem-list">${items.map((m) => `<div class="ai-mem-row">${badge(kindLabel[m.kind] || 'Note', m.kind === 'goal' ? 'violet' : 'neutral')}<span class="grow">${esc(m.text)}<br><small class="muted">${esc(m.by)} · ${fmtDate(new Date(m.createdAt).toISOString().slice(0, 10))}</small></span>${m.canRemove ? `<button class="icon-btn" data-forget="${esc(m.id)}" title="Forget" aria-label="Forget">${icon('trash')}</button>` : ''}</div>`).join('')}</div>` : '<p class="muted small"><i>Nothing saved yet.</i></p>'}`;
+  box.querySelectorAll('[data-forget]').forEach((b) => (b.onclick = async () => {
+    try { await Api.req('DELETE', '/assistant/memory/' + encodeURIComponent(b.dataset.forget)); toast('Forgotten'); renderAiMemory(box); } catch (e) { toast(e.message, 'error'); }
+  }));
+}

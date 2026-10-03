@@ -18,10 +18,13 @@ function load() {
     serveFrontend: env.SERVE_FRONTEND !== 'false',
     email: { apiKey: env.RESEND_API_KEY || '', from: env.EMAIL_FROM || '', apiUrl: env.EMAIL_API_URL || 'https://api.resend.com/emails' },
     maxUploadMb: Number(env.MAX_UPLOAD_MB) || 10,
+    ai: { apiKey: env.OPENAI_API_KEY || '', model: env.AI_MODEL || 'gpt-5.5', effort: env.AI_REASONING_EFFORT || '', perUserPer10Min: Number(env.AI_RATE_LIMIT) || 40 },
   };
+  cfg.aiEnabled = !!cfg.ai.apiKey;
   cfg.emailEnabled = !!(cfg.email.apiKey && cfg.email.from);
   if (!cfg.emailEnabled) log.warn('Email is off (set RESEND_API_KEY and EMAIL_FROM): no password-reset emails, invites or emailed reminders');
   if (cfg.emailEnabled && !cfg.appUrl) log.warn('APP_URL is not set: emails cannot include links back to the app');
+  if (!cfg.aiEnabled) log.warn('AI co-founder is off (set OPENAI_API_KEY to turn it on)');
   if (!cfg.cronSecret) log.warn('CRON_SECRET is not set: /api/cron is disabled');
   return cfg;
 }

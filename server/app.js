@@ -46,6 +46,7 @@ function createApp() {
   app.use('/api', require('./routes/auth').router);
   app.use('/api', require('./routes/data').router);
   app.use('/api', require('./routes/admin').router);
+  app.use('/api', require('./routes/assistant').router);
   app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
   /* Frontend (optional: lets one Render service host everything) */
