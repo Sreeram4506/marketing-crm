@@ -200,7 +200,8 @@ function openEmployeeForm(user) {
 
 /* ---------- Payroll ---------- */
 const payrollState = { month: '' };
-Views.payroll = function (main) {
+Views.payroll = function (main, _id, params = {}) {
+  if (/^\d{4}-\d{2}$/.test(params.month || '')) { payrollState.month = params.month; history.replaceState(null, '', '#/payroll'); } // e.g. opened by the AI co-founder
   if (!payrollState.month) payrollState.month = addMonths(monthKey(), -1);
   const mk = payrollState.month;
   const people = Store.users.filter((u) => u.role !== 'client' && u.status !== 'Inactive' && u.ctc && (!u.joinDate || u.joinDate <= mk + '-31'));

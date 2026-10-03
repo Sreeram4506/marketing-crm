@@ -9,9 +9,11 @@ const { filterForUser } = require('../policy');
 const { applySync } = require('../sync');
 const insights = require('./insights');
 const memory = require('./memory');
+const cfg = require('../config');
+const notify = require('../notify');
 
 const S = shared;
-const NEEDS_CONFIRMATION = new Set(['record_payment', 'create_client', 'decide_leave', 'plan_month']);
+const NEEDS_CONFIRMATION = new Set(['record_payment', 'create_client', 'decide_leave', 'plan_month', 'add_team_member', 'update_team_member']);
 const STAFF = ['admin', 'pm', 'creative', 'shoot', 'finance'];
 
 /* ---------- Tool definitions (sent to the model; keep order stable for prompt caching) ---------- */
@@ -78,6 +80,20 @@ const DEFINITIONS = [
     input_schema: { type: 'object', properties: { text: str('One clear sentence, with dates and numbers spelled out (e.g. "Reach 10 lakh monthly revenue by March 2027")'), kind: str('goal, note or personal') }, required: ['text', 'kind'] } },
   { name: 'forget', description: 'Remove an item from long-term memory, by its id (shown in brackets in your memory).',
     input_schema: { type: 'object', properties: { id: str('Memory id, e.g. mem_abc123') }, required: ['id'] } },
+  { name: 'add_team_member', description: 'Add a new employee (admins only). Requires confirmation. Email is required for their login — ask for it if not given; never invent one. Salary: give monthly_salary (gross per month) or annual_ctc. Roles: admin, pm (project manager), creative (designer/editor/writer/ads), shoot (shoot crew), finance. Once they have a salary they appear on the Payroll screen from their joining month.',
+    input_schema: { type: 'object', properties: {
+      name: str('Full name'), email: str('Work email'), role: str('admin, pm, creative, shoot or finance'), designation: str('Job title, e.g. Graphic Designer'),
+      department: str('Management, Accounts, Design, Video, Copy, Ads, Shoot or HR & Ops'), monthly_salary: num('Gross monthly salary in rupees'), annual_ctc: num('Annual CTC in rupees (alternative to monthly_salary)'),
+      join_date: str('YYYY-MM-DD, default today'), work_arrangement: str('Full-Time In-Office, Hybrid, Fully Remote or Freelancer / Contractor'), phone: str('Phone'),
+      send_invite: { type: 'boolean', description: 'Email them a link to set their password (only works if email is set up on the server)' },
+    }, required: ['name', 'email'] } },
+  { name: 'update_team_member', description: 'Change an employee\'s salary, role, title, department, joining date, work arrangement, phone or status (Active, On Leave, Inactive). Admins only. Requires confirmation.',
+    input_schema: { type: 'object', properties: {
+      person: str('Name of the employee'), monthly_salary: num('New gross monthly salary in rupees'), annual_ctc: num('New annual CTC in rupees'), role: str('admin, pm, creative, shoot or finance'),
+      designation: str('Job title'), department: str('Department'), join_date: str('YYYY-MM-DD'), work_arrangement: str('Work arrangement'), phone: str('Phone'), status: str('Employee status'),
+    }, required: ['person'] } },
+  { name: 'get_payroll', description: 'Payroll for a month (admins and finance): each person\'s gross, loss-of-pay days, deductions (PF, professional tax, TDS) and net pay, plus totals. Salaries come from each person\'s CTC; the Payroll screen shows the same figures.',
+    input_schema: { type: 'object', properties: { month: str('YYYY-MM; default last month'), person: str('Only this person') } } },
   { name: 'confirm_action', description: 'Carry out an action that was waiting for confirmation, after the user has clearly said yes in their latest message.',
     input_schema: { type: 'object', properties: { confirmation_id: str('The id returned when the action was proposed') }, required: ['confirmation_id'] } },
 ];
@@ -148,6 +164,16 @@ async function commit(ctx, changes, activity) {
   return r;
 }
 const needRole = (ctx, roles, what) => { if (!roles.includes(ctx.user.role)) fail(`Your role (${S.ROLES[ctx.user.role].label}) can't ${what}.`); };
+
+const memberRole = (r) => { const n = norm(r); return !n ? null : ['admin', 'pm', 'creative', 'shoot', 'finance'].find((k) => k === n || norm(S.ROLES[k].label).includes(n)) || ({ designer: 'creative', editor: 'creative', writer: 'creative', 'project manager': 'pm', manager: 'pm', accounts: 'finance', accountant: 'finance', camera: 'shoot', cinematographer: 'shoot', photographer: 'shoot' })[n] || null; };
+const deptFor = (role) => ({ admin: 'Management', pm: 'Management', creative: 'Design', shoot: 'Shoot', finance: 'Accounts' })[role];
+const pickWork = (w) => S.WORK_ARRANGEMENTS.find((x) => norm(x) === norm(w)) || S.WORK_ARRANGEMENTS.find((x) => norm(w) && norm(x).includes(norm(w).split(' ')[0])) || S.WORK_ARRANGEMENTS[0];
+function salaryToCtc(input) {
+  const m = Number(input.monthly_salary), y = Number(input.annual_ctc);
+  if (input.monthly_salary != null && !(m > 0)) fail('Monthly salary must be more than zero.');
+  if (input.annual_ctc != null && !(y > 0)) fail('Annual CTC must be more than zero.');
+  return m > 0 ? Math.round(m * 12) : y > 0 ? Math.round(y) : 0;
+}
 
 /* ---------- Implementations ---------- */
 const IMPL = {
@@ -510,6 +536,75 @@ const IMPL = {
     if (r.error === 'forbidden') fail('Only an admin (or whoever saved it) can remove that agency memory.');
     ctx.memoryChanged = true;
     return { forgot: r.removed };
+  },
+
+  async add_team_member(input, ctx) {
+    needRole(ctx, ['admin'], 'add team members');
+    const v = bind(await viewFor(ctx.user));
+    const name = String(input.name || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    const email = String(input.email || '').trim().toLowerCase();
+    if (!name) fail('What is their name?');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail('A valid work email is needed for their login — ask the user for it.');
+    if (v.users.some((u) => (u.email || '').toLowerCase() === email)) fail(`Someone already uses ${email}.`);
+    const dupe = v.users.find((u) => norm(u.name) === norm(name) && u.role !== 'client');
+    const role = memberRole(input.role) || 'creative';
+    const ctc = salaryToCtc(input);
+    const joinDate = input.join_date ? (isDate(input.join_date) ? input.join_date : fail('Joining date must be YYYY-MM-DD.')) : today();
+    const wa = pickWork(input.work_arrangement);
+    const dept = S.DEPARTMENTS.find((d) => norm(d) === norm(input.department)) || deptFor(role);
+    const designation = String(input.designation || S.ROLES[role].label).slice(0, 100);
+    return {
+      summary: `Add ${name} (${email}) as ${designation}, ${S.ROLES[role].label}, joining ${joinDate}${ctc ? `, salary ${rupees(Math.round(ctc / 12))}/month (${rupees(ctc)} a year)` : ', no salary set'}${dupe ? ` — note: ${dupe.name} already exists with ${dupe.email}` : ''}`,
+      run: async () => {
+        const u = { id: S.uid('u'), name, email, phone: String(input.phone || '').slice(0, 30), role, designation, department: dept, workArrangement: wa, status: 'Active', joinDate,
+          emergencyContact: { name: '', phone: '' }, ctc, bank: { holder: name, account: '', ifsc: '' }, idProof: { type: 'PAN', number: '', verified: false }, docs: { nda: '', contract: '', idCopy: '' },
+          leaveQuota: { casual: 12, sick: 8, pto: 12 } };
+        await commit(ctx, { users: { upsert: [u] } }, [{ action: 'Employee added', details: `${u.name} — ${u.designation} (${S.ROLES[role].label})${ctc ? `, CTC ${rupees(ctc)}` : ''}`, entity: 'employee', entityId: u.id }]);
+        let login = 'They need a login: set a password for them in Team & HR (edit their profile).';
+        if (input.send_invite && cfg.emailEnabled && cfg.appUrl) {
+          login = (await notify.sendInvite(u.id, ctx.user).catch(() => false)) ? `Invite emailed to ${email}.` : `The invite email failed; set a password for them in Team & HR.`;
+        }
+        if (ctc) ctx.navigate = `#/payroll?month=${joinDate.slice(0, 7) > S.monthKey() ? joinDate.slice(0, 7) : S.monthKey()}`; // show the month they appear in
+        return { added: name, role: S.ROLES[role].label, monthly_salary: Math.round(ctc / 12) || undefined, on_payroll_from: ctc ? joinDate.slice(0, 7) : undefined, login, opened: ctc ? 'Payroll screen' : undefined };
+      },
+    };
+  },
+
+  async update_team_member(input, ctx) {
+    needRole(ctx, ['admin'], 'change employee details');
+    const v = bind(await viewFor(ctx.user));
+    const p = pickOne('person', v.users.filter((u) => u.role !== 'client'), input.person, (u) => u.name);
+    const next = { ...p }, changes = [];
+    const ctc = salaryToCtc(input);
+    if (ctc) { next.ctc = ctc; changes.push(`salary ${p.ctc ? rupees(Math.round(p.ctc / 12)) : 'none'} → ${rupees(Math.round(ctc / 12))}/month`); }
+    if (input.role) { const r = memberRole(input.role) || fail('Role must be admin, pm, creative, shoot or finance.'); if (p.id === ctx.user.id) fail('You can’t change your own role.'); next.role = r; changes.push(`role ${S.ROLES[p.role].label} → ${S.ROLES[r].label}`); }
+    if (input.designation) { next.designation = String(input.designation).slice(0, 100); changes.push(`title ${input.designation}`); }
+    if (input.department) { next.department = S.DEPARTMENTS.find((d) => norm(d) === norm(input.department)) || fail(`Department must be one of ${S.DEPARTMENTS.join(', ')}.`); changes.push(`department ${next.department}`); }
+    if (input.join_date) { if (!isDate(input.join_date)) fail('Joining date must be YYYY-MM-DD.'); next.joinDate = input.join_date; changes.push(`joining date ${input.join_date}`); }
+    if (input.work_arrangement) { next.workArrangement = pickWork(input.work_arrangement); changes.push(next.workArrangement); }
+    if (input.phone) { next.phone = String(input.phone).slice(0, 30); changes.push('phone updated'); }
+    if (input.status) { const st = S.EMPLOYEE_STATUSES.find((x) => norm(x) === norm(input.status)) || fail(`Status must be ${S.EMPLOYEE_STATUSES.join(', ')}.`); if (p.id === ctx.user.id) fail('You can’t change your own status.'); next.status = st; changes.push(`status ${p.status} → ${st}`); }
+    if (!changes.length) fail('Nothing to change was given.');
+    return {
+      summary: `Update ${p.name}: ${changes.join(', ')}`,
+      run: async () => {
+        await commit(ctx, { users: { upsert: [next] } }, [{ action: 'Employee updated', details: `${p.name} — ${changes.map((c) => (c.startsWith('salary') ? 'compensation changed' : c)).join(', ')}`, entity: 'employee', entityId: p.id }]);
+        if (ctc) ctx.navigate = `#/payroll?month=${S.monthKey()}`;
+        return { updated: p.name, changes };
+      },
+    };
+  },
+
+  async get_payroll(input, ctx) {
+    needRole(ctx, ['admin', 'finance'], 'see payroll');
+    const v = bind(await viewFor(ctx.user));
+    const mk = /^\d{4}-\d{2}$/.test(input.month || '') ? input.month : S.addMonths(S.monthKey(), -1);
+    let people = v.users.filter((u) => u.role !== 'client' && u.status !== 'Inactive');
+    if (input.person) { const p = pickOne('person', people, input.person, (u) => u.name); people = [p]; }
+    const missing = people.filter((u) => !u.ctc).map((u) => u.name);
+    const rows = people.filter((u) => u.ctc && (!u.joinDate || u.joinDate <= mk + '-31')).map((u) => { const p = S.payslip(u, mk); return { name: u.name, gross: p.monthly, lop_days: p.lop, lop: p.lopAmt, pf: p.pf, professional_tax: p.pt, tds: p.tds, net: p.net }; });
+    return { month: mk, in_progress: mk >= S.monthKey() || undefined, people: rows.length, gross_total: rows.reduce((a, r) => a + r.gross, 0), net_total: rows.reduce((a, r) => a + r.net, 0), rows,
+      no_salary_set: missing.length ? missing : undefined };
   },
 
   async open_page(input, ctx) {

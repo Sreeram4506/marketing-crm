@@ -74,6 +74,7 @@ Press the sparkle button (or **Ctrl/⌘ + J**) and talk or type. The co-founder 
   - "Approve Neha's leave."
   - "Clock me in." / "Going for lunch." / "Clock me out — finished the storyboards."
   - "Log Apollo's review: five stars, NPS nine." / "Draft a reminder for GreenLeaf." / "Open FitNation's billing."
+  - "Add Mulukuri Sreeram as a graphic designer, sreeram@ourmail.in, 25,000 a month." / "Raise Kavya to 60 thousand." / "What's September's payroll?" (admins; adding people and changing salaries need confirmation)
 - **Voice:**
   - Tap the mic to speak. Replies are read aloud as they're written, and you can talk over the co-founder to interrupt it.
   - **Hands-free mode** (headset icon) keeps the conversation going without tapping.
@@ -82,7 +83,7 @@ Press the sparkle button (or **Ctrl/⌘ + J**) and talk or type. The co-founder 
 
 **Safety built in:**
 - **Same permissions as the person.** The co-founder acts with the speaking person's own permissions and saves through the same checked path as the app, so a designer can't move money by asking nicely.
-- **Confirmation before risky actions.** Recording a payment, adding a client, approving or rejecting leave, and bulk planning all need a spoken "yes" or a tap on **Confirm**. The *server* enforces that the yes came in a later message, so a misheard word can't trigger it.
+- **Confirmation before risky actions.** Recording a payment, adding a client or team member, changing someone's salary or role, approving or rejecting leave, and bulk planning all need a spoken "yes" or a tap on **Confirm**. The *server* enforces that the yes came in a later message, so a misheard word can't trigger it.
 - **Audit trail.** Every action shows up in the audit trail marked "via AI assistant".
 - **Admin switch.** Admins can turn the co-founder off in Settings.
 
@@ -222,7 +223,7 @@ Open http://localhost:4000. This needs MongoDB running locally, for example `bre
 ```bash
 MONGODB_URI=mongodb://127.0.0.1:27017 npm test --prefix server
 ```
-There are 51 end-to-end tests: 36 for the app and 15 for the AI co-founder, which run against a scripted stand-in for the OpenAI API. Each run starts a real server against a throwaway database (dropped afterwards), with stand-ins for the webhook and email provider. They cover:
+There are 52 end-to-end tests: 36 for the app and 16 for the AI co-founder, which run against a scripted stand-in for the OpenAI API. Each run starts a real server against a throwaway database (dropped afterwards), with stand-ins for the webhook and email provider. They cover:
 - **Setup and sign-in:** first-run setup, logins, rate limits, account lockout, weak passwords.
 - **2FA:** enrolment, sign-in challenge, single-use recovery codes, requiring 2FA by role.
 - **Sessions and email links:** "sign out everywhere", password-reset and invite links (single use), leave notifications.

@@ -36,7 +36,8 @@ How to act:
 - Do things, don't describe how. When the user asks for an action, call the tool. Chain tools when needed (e.g. search, then update). Never claim something was done unless a tool confirmed it.
 - Never invent numbers, names or dates. Every fact about the business comes from a tool result. If a tool says something isn't allowed for their role, tell them plainly.
 - Resolve vague references yourself with search / get_client; ask a short question only when it's genuinely ambiguous.
-- Some actions (recording payments, adding clients, approving or rejecting leave, bulk planning) come back as "needs confirmation" with a summary. Read the summary back in one sentence and ask "Shall I go ahead?". Only call confirm_action after the user clearly agrees in a new message. If they change details, propose the action again.
+- You can run HR too: add team members (ask for their work email if not given — never make one up), change salaries, roles and status, and read payroll. Payroll is calculated from each person's salary, so "add a payroll entry of 25,000" for someone means setting their monthly salary to 25,000 (adding them as a team member first if they don't exist). Never ask for or store bank or ID numbers; those are entered on the person's profile.
+- Some actions (recording payments, adding clients, approving or rejecting leave, bulk planning, adding team members, changing employee details) come back as "needs confirmation" with a summary. Read the summary back in one sentence and ask "Shall I go ahead?". Only call confirm_action after the user clearly agrees in a new message. If they change details, propose the action again.
 - Clocking out needs a one-line end-of-day summary; if they haven't said what they did, ask.
 - Dates: convert "today", "tomorrow", "Friday", "next week" to YYYY-MM-DD using the date in the context. Money is Indian rupees; say amounts the Indian way (e.g. "1.2 lakh", "45 thousand").
 - Use open_page when the user asks to see or open something, or when showing a screen clearly helps.
@@ -47,13 +48,14 @@ How to speak:
 - In voice mode your words are read aloud: two to four short sentences, natural spoken English, no markdown, no bullet points, no tables, no emoji, no IDs or URLs. Lead with the answer or your recommendation.
 - In text mode be brief and direct; short lists are fine for priorities or several items. Use plain text with "- " for lists, no headings or tables.`;
 
-const DONE_LABELS = { record_payment: 'Payment recorded', create_client: 'Client added', decide_leave: 'Leave decision saved', plan_month: 'Month planned' };
+const DONE_LABELS = { record_payment: 'Payment recorded', create_client: 'Client added', decide_leave: 'Leave decision saved', plan_month: 'Month planned', add_team_member: 'Team member added', update_team_member: 'Employee updated' };
 const TOOLS = DEFINITIONS.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: t.input_schema, strict: false }));
 const LABELS = {
   get_overview: 'Checking the business', search: 'Searching', get_client: 'Looking up the client', list_tasks: 'Checking tasks', list_invoices: 'Checking invoices', get_team: 'Checking the team',
   get_my_day: 'Checking your day', create_task: 'Creating task', update_task: 'Updating task', record_payment: 'Preparing payment', create_client: 'Preparing new client', update_client: 'Updating client',
   log_feedback: 'Logging feedback', request_leave: 'Requesting leave', decide_leave: 'Preparing leave decision', attendance: 'Updating attendance', draft_reminder: 'Drafting reminder', plan_month: 'Planning the month',
   open_page: 'Opening page', confirm_action: 'Carrying it out', business_review: 'Reviewing the business', remember: 'Remembering', forget: 'Forgetting',
+  add_team_member: 'Preparing new team member', update_team_member: 'Preparing employee change', get_payroll: 'Checking payroll',
 };
 
 /* ---------- Conversations (in memory; append-only so the cached prefix keeps matching) ---------- */
@@ -123,6 +125,7 @@ function summarise(name, out) {
   if (out.updated) return `${out.updated}: ${(out.changes || []).join(', ')}`;
   if (out.opened) return out.page || out.opened;
   if (out.remembered) return out.remembered;
+  if (name === 'get_payroll') return `${out.people} people · net ${shared.inr(out.net_total)}`;
   if (out.forgot) return out.forgot;
   if (name === 'business_review' && out.signals) return out.signals.length ? `${out.signals.length} thing${out.signals.length > 1 ? 's' : ''} worth attention` : 'All looks healthy';
   if (typeof out.total === 'number') return `${out.total} found`;

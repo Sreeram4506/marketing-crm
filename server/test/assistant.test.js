@@ -295,6 +295,38 @@ test('long-term memory: goals carry into new conversations; permissions apply', 
   assert.ok(!(await call('GET', '/assistant/memory', null, tokens.admin)).body.items.some((m) => m.id === goal.id));
 });
 
+test('HR by voice: add a team member with a salary (after confirming), then they show up in payroll', async () => {
+  // A missing email is refused rather than invented
+  mock.reply(mock.tool('add_team_member', { name: 'Mulukuri Sreeram', monthly_salary: 25000 }), (body) => { assert.match(mock.lastToolResult(body).data.error, /valid work email/); return mock.text('What is their work email?'); });
+  await ask('admin', 'Add Mulukuri Sreeram with a 25,000 payroll entry');
+  let confirmationId;
+  mock.reply(mock.tool('add_team_member', { name: 'Mulukuri Sreeram', email: 'sreeram@brightpixel.in', role: 'designer', designation: 'Graphic Designer', monthly_salary: 25000, join_date: '2026-09-01' }), (body) => {
+    const r = mock.lastToolResult(body).data;
+    assert.equal(r.needs_confirmation, true);
+    assert.match(r.summary, /Mulukuri Sreeram.*Graphic Designer.*₹25,000\/month/);
+    confirmationId = r.confirmation_id;
+    return mock.text('Add Mulukuri Sreeram at 25 thousand a month? Shall I go ahead?');
+  });
+  const r1 = await ask('admin', 'sreeram@brightpixel.in, graphic designer, joined 1 September');
+  assert.ok(!(await data('admin')).users.some((u) => u.email === 'sreeram@brightpixel.in'), 'nothing saved before confirming');
+  mock.reply(() => mock.tool('confirm_action', { confirmation_id: confirmationId }), (body) => { const d = mock.lastToolResult(body).data; assert.equal(d.added, 'Mulukuri Sreeram'); assert.equal(d.monthly_salary, 25000); assert.match(d.login, /password/); return mock.text('Added.'); });
+  const r2 = await ask('admin', 'Yes', { conversationId: r1.conversationId });
+  assert.match(r2.of('navigate')[0].route, /^#\/payroll\?month=\d{4}-\d{2}$/, 'opens Payroll on a month that includes them');
+  const u = (await data('admin')).users.find((x) => x.email === 'sreeram@brightpixel.in');
+  assert.equal(u.ctc, 300000); assert.equal(u.role, 'creative'); assert.equal(u.joinDate, '2026-09-01');
+  mock.reply(mock.tool('get_payroll', { month: '2026-09', person: 'Mulukuri' }), (body) => { const d = mock.lastToolResult(body).data; assert.equal(d.rows[0].gross, 25000); return mock.text('ok'); });
+  await ask('fin', 'What is Sreeram paid in September?');
+  // A salary change needs confirmation too, and only admins can do it
+  mock.reply(mock.tool('update_team_member', { person: 'Mulukuri', monthly_salary: 30000 }), (body) => { assert.match(mock.lastToolResult(body).data.error, /can't change employee details/); return mock.text('No.'); });
+  await ask('fin', 'Raise Sreeram to 30 thousand');
+  mock.reply(mock.tool('update_team_member', { person: 'Mulukuri', monthly_salary: 30000 }), (body) => { confirmationId = mock.lastToolResult(body).data.confirmation_id; return mock.text('Confirm?'); });
+  const r3 = await ask('admin', 'Raise Sreeram to 30 thousand');
+  mock.reply(() => mock.tool('confirm_action', { confirmation_id: confirmationId }), mock.text('Done.'));
+  await ask('admin', 'Yes', { conversationId: r3.conversationId });
+  assert.equal((await data('admin')).users.find((x) => x.email === 'sreeram@brightpixel.in').ctc, 360000);
+  assert.ok((await data('admin')).activity.some((a) => a.action === 'Employee added' && /Mulukuri Sreeram.*via AI assistant/.test(a.details)));
+});
+
 test('refusals, API failures and bad requests are handled cleanly', async () => {
   mock.reply(mock.refusal('I can’t help with that.'));
   const r = await ask('admin', 'something');
